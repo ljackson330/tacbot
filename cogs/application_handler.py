@@ -1,3 +1,4 @@
+import os
 import discord
 from discord.ext import commands, tasks
 import json
@@ -37,7 +38,10 @@ class ApplicationHandler(commands.Cog):
 
     @tasks.loop(seconds=30)
     async def check_new_responses(self):
-        """Check for new Google Form responses every 30 seconds"""
+        """
+        TODO: this will need to be toned down in prod
+        Check for new Google Form responses every 30 seconds
+        """
         try:
             responses = await self.google_service.get_form_responses(self.form_id)
 
@@ -91,7 +95,7 @@ class ApplicationHandler(commands.Cog):
         answers = response.get('answers', {})
 
         embed = discord.Embed(
-            title="📋 New Application Submission",
+            title="New Application Submission",
             description=f"**Application ID:** `{response_id}`\n**Submitted:** `{timestamp}`",
             color=discord.Color.blue()
         )
@@ -165,12 +169,12 @@ class ApplicationHandler(commands.Cog):
         # Update embed color to green
         embed = message.embeds[0]
         embed.color = discord.Color.green()
-        embed.description += "\n\n✅ **ACCEPTED**"
+        embed.description += "\n\n**ACCEPTED**"
 
         await message.edit(embed=embed)
 
         # Send acceptance message
-        await message.channel.send(f"✅ Application `{response_id}` has been **ACCEPTED**!")
+        await message.channel.send(f"Application `{response_id}` has been **ACCEPTED**!")
 
         # Mark as processed in database
         self.db.set_application_status(response_id, 'accepted')
@@ -185,12 +189,12 @@ class ApplicationHandler(commands.Cog):
         # Update embed color to red
         embed = message.embeds[0]
         embed.color = discord.Color.red()
-        embed.description += "\n\n❌ **DENIED**"
+        embed.description += "\n\n**DENIED**"
 
         await message.edit(embed=embed)
 
         # Send denial message
-        await message.channel.send(f"❌ Application `{response_id}` has been **DENIED**.")
+        await message.channel.send(f"Application `{response_id}` has been **DENIED**.")
 
         # Mark as processed in database
         self.db.set_application_status(response_id, 'denied')
@@ -215,9 +219,9 @@ class ApplicationHandler(commands.Cog):
     @commands.has_permissions(administrator=True)
     async def force_recheck(self, ctx):
         """Manually trigger a check for new responses"""
-        await ctx.send("🔄 Checking for new responses...")
+        await ctx.send("Checking for new responses...")
         await self.check_new_responses()
-        await ctx.send("✅ Check complete!")
+        await ctx.send("Check complete")
 
 
 async def setup(bot):

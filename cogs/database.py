@@ -47,18 +47,6 @@ class Database:
                 )
             ''')
 
-            # Table for storing application votes (optional, for analytics)
-            cursor.execute('''
-                CREATE TABLE IF NOT EXISTS application_votes (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    response_id TEXT,
-                    user_id INTEGER,
-                    vote TEXT,
-                    voted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (response_id) REFERENCES applications (response_id)
-                )
-            ''')
-
             conn.commit()
             logger.info("Database initialized successfully")
 

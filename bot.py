@@ -33,6 +33,8 @@ class TacBot(commands.Bot):
         """Called when the bot is starting up"""
         cogs_to_load = [
             'cogs.application_handler',
+            'cogs.database',
+            'cogs.google_forms_service'
         ]
 
         for cog in cogs_to_load:
