@@ -2,7 +2,6 @@ import sqlite3
 import os
 import logging
 from typing import Optional, Dict, Any
-from datetime import datetime
 import threading
 
 logger = logging.getLogger(__name__)
@@ -210,8 +209,8 @@ class Database:
 
             cursor.execute('''
                 DELETE FROM processed_responses 
-                WHERE processed_at < datetime('now', '-{} days')
-            '''.format(days))
+                WHERE processed_at < datetime('now', ? || ' days')
+            ''', (f'-{days}',))
 
             conn.commit()
             logger.info(f"Cleaned up old data older than {days} days")

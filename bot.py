@@ -24,7 +24,7 @@ class TacBot(commands.Bot):
         intents.reactions = True
 
         super().__init__(
-            command_prefix='!',
+            command_prefix="!",
             intents=intents,
             description='Havoc Tactical Bot'
         )
@@ -32,9 +32,7 @@ class TacBot(commands.Bot):
     async def setup_hook(self):
         """Called when the bot is starting up"""
         cogs_to_load = [
-            'cogs.application_handler',
-            'cogs.database',
-            'cogs.google_forms_service'
+            'cogs.application_handler'
         ]
 
         for cog in cogs_to_load:
@@ -45,7 +43,7 @@ class TacBot(commands.Bot):
                 logging.error(f"Failed to load cog {cog}: {e}")
 
     async def on_ready(self):
-        logging.info('TacBot connected to Discord')
+        logging.info('TacBot has connected to Discord')
 
 
 async def main():
@@ -54,9 +52,9 @@ async def main():
     try:
         await bot.start(os.getenv('DISCORD_TOKEN'))
     except KeyboardInterrupt:
-        logging.info("TacBot shutdown requested")
+        logging.info("Bot shutdown requested")
     except Exception as e:
-        logging.error(f"TacBot encountered an error: {e}")
+        logging.error(f"Bot encountered an error: {e}")
     finally:
         await bot.close()
 

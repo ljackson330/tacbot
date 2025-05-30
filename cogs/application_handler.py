@@ -1,10 +1,9 @@
-import os
 import discord
 from discord.ext import commands, tasks
-import json
+from discord import app_commands
+import os
 import logging
-from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 from .google_forms_service import GoogleFormsService
 from .database import Database
 
@@ -17,17 +16,13 @@ class ApplicationHandler(commands.Cog):
         self.db = Database()
         self.google_service = GoogleFormsService()
 
-        # Configuration - these should come from environment or config
+        # Configuration
         self.channel_id = int(os.getenv('APPLICATION_CHANNEL_ID'))
         self.form_id = os.getenv('GOOGLE_FORM_ID')
         self.acceptance_threshold = int(os.getenv('ACCEPTANCE_THRESHOLD', '2'))
 
-        # Question mapping - consider moving to config file
-        self.question_map = {
-            '758b061c': 'Multiple Choice Question',
-            '4608a6e7': 'Short Answer Question'
-            # Add more mappings as needed
-        }
+        # Question mapping - will be built dynamically from form
+        self.question_map = {}
 
         # Start the polling task
         self.check_new_responses.start()
@@ -36,13 +31,15 @@ class ApplicationHandler(commands.Cog):
         """Cleanup when cog is unloaded"""
         self.check_new_responses.cancel()
 
+    # TODO: tone this the fuck down in prod
     @tasks.loop(seconds=30)
     async def check_new_responses(self):
-        """
-        TODO: this will need to be toned down in prod
-        Check for new Google Form responses every 30 seconds
-        """
+        """Check for new Google Form responses every 30 seconds"""
         try:
+            # Build question map if not already done
+            if not self.question_map:
+                await self._build_question_map()
+
             responses = await self.google_service.get_form_responses(self.form_id)
 
             for response in responses:
@@ -60,6 +57,17 @@ class ApplicationHandler(commands.Cog):
     async def before_check_responses(self):
         """Wait until bot is ready before starting the loop"""
         await self.bot.wait_until_ready()
+
+    async def _build_question_map(self):
+        """Build question map from Google Form metadata"""
+        try:
+            form_info = await self.google_service.get_form_info(self.form_id)
+            self.question_map = self.google_service.build_question_map(form_info)
+            logger.info(f"Built question map with {len(self.question_map)} questions")
+        except Exception as e:
+            logger.error(f"Error building question map: {e}")
+            # Fallback to basic mapping if form info fails
+            self.question_map = {}
 
     async def _process_new_response(self, response: Dict[str, Any]):
         """Process a new form response"""
@@ -135,9 +143,9 @@ class ApplicationHandler(commands.Cog):
         if str(reaction.emoji) not in ['👍', '👎']:
             return
 
-        await self._handle_application_vote(reaction, user, app_data)
+        await self._handle_application_vote(reaction, app_data)
 
-    async def _handle_application_vote(self, reaction, user, app_data):
+    async def _handle_application_vote(self, reaction, app_data):
         """Handle voting on applications"""
         try:
             message = reaction.message
@@ -168,7 +176,7 @@ class ApplicationHandler(commands.Cog):
         """Accept an application"""
         # Update embed color to green
         embed = message.embeds[0]
-        embed.color = discord.Color.green()
+        embed.colour = discord.Color.green()
         embed.description += "\n\n**ACCEPTED**"
 
         await message.edit(embed=embed)
@@ -179,8 +187,7 @@ class ApplicationHandler(commands.Cog):
         # Mark as processed in database
         self.db.set_application_status(response_id, 'accepted')
 
-        # TODO: Add email sending logic here
-        # await self._send_acceptance_email(response_id)
+        # TODO: email sending logic here
 
         logger.info(f"Application {response_id} accepted")
 
@@ -188,7 +195,7 @@ class ApplicationHandler(commands.Cog):
         """Deny an application"""
         # Update embed color to red
         embed = message.embeds[0]
-        embed.color = discord.Color.red()
+        embed.colour = discord.Color.red()
         embed.description += "\n\n**DENIED**"
 
         await message.edit(embed=embed)
@@ -201,27 +208,42 @@ class ApplicationHandler(commands.Cog):
 
         logger.info(f"Application {response_id} denied")
 
-    @commands.command(name='appstatus')
-    @commands.has_permissions(manage_messages=True)
-    async def application_status(self, ctx, response_id: str = None):
+    @app_commands.command(name="appstatus", description="Check the status of an application")
+    @app_commands.describe(response_id="The application response ID to check")
+    async def application_status(self, interaction: discord.Interaction, response_id: str):
         """Check the status of an application"""
-        if not response_id:
-            await ctx.send("Please provide an application ID.")
+        if not interaction.user.guild_permissions.manage_messages:
+            await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
             return
 
         status = self.db.get_application_status(response_id)
         if status:
-            await ctx.send(f"Application `{response_id}` status: **{status['status'].upper()}**")
+            await interaction.response.send_message(
+                f"Application `{response_id}` status: **{status['status'].upper()}**")
         else:
-            await ctx.send(f"Application `{response_id}` not found.")
+            await interaction.response.send_message(f"Application `{response_id}` not found.")
 
-    @commands.command(name='recheck')
-    @commands.has_permissions(administrator=True)
-    async def force_recheck(self, ctx):
+    @app_commands.command(name="recheck", description="Manually trigger a check for new responses")
+    async def force_recheck(self, interaction: discord.Interaction):
         """Manually trigger a check for new responses"""
-        await ctx.send("Checking for new responses...")
-        await self.check_new_responses()
-        await ctx.send("Check complete")
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
+            return
+
+        await interaction.response.send_message("Checking for new responses...")
+        try:
+            await self.check_new_responses()
+            await interaction.followup.send("Check complete!")
+        except Exception as e:
+            await interaction.followup.send(f"Error during check: {str(e)}")
+
+    async def cog_load(self):
+        """Sync slash commands when cog is loaded"""
+        try:
+            synced = await self.bot.tree.sync()
+            logger.info(f"Synchronized {len(synced)} slash commands")
+        except Exception as e:
+            logger.error(f"Failed to sync slash commands: {e}")
 
 
 async def setup(bot):

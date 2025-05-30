@@ -1,10 +1,9 @@
 import os
-import json
 import asyncio
 from typing import List, Dict, Any
-from apiclient import discovery
-from httplib2 import Http
-from oauth2client import client, file, tools
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
 import logging
 
 logger = logging.getLogger(__name__)
@@ -23,23 +22,20 @@ class GoogleFormsService:
     def _initialize_service(self):
         """Initialize the Google Forms service"""
         try:
-            store = file.Storage(self.token_file)
-            creds = store.get()
+            creds = None
+            if os.path.exists(self.token_file):
+                creds = Credentials.from_authorized_user_file(self.token_file, self.scopes)
 
-            if not creds or creds.invalid:
-                if not os.path.exists(self.credentials_file):
-                    raise FileNotFoundError(f"Google credentials file not found: {self.credentials_file}")
+            if not creds or not creds.valid:
+                if creds and creds.expired and creds.refresh_token:
+                    creds.refresh(Request())
+                else:
+                    flow = InstalledAppFlow.from_client_secrets_file(
+                        self.credentials_file, self.scopes)
+                    creds = flow.run_local_server(port=0)
 
-                flow = client.flow_from_clientsecrets(self.credentials_file, self.scopes)
-                creds = tools.run_flow(flow, store)
-
-            self.service = discovery.build(
-                "forms",
-                "v1",
-                http=creds.authorize(Http()),
-                discoveryServiceUrl=self.discovery_doc,
-                static_discovery=False,
-            )
+                with open(self.token_file, 'w') as token:
+                    token.write(creds.to_json())
 
             logger.info("Google Forms service initialized successfully")
 
@@ -109,11 +105,14 @@ class GoogleFormsService:
         try:
             items = form_info.get('items', [])
             for item in items:
-                question_id = item.get('questionItem', {}).get('question', {}).get('questionId')
-                title = item.get('title', f'Question {question_id}')
+                # Handle different item types
+                if 'questionItem' in item:
+                    question = item['questionItem']['question']
+                    question_id = question.get('questionId')
+                    title = item.get('title', f'Question {question_id}')
 
-                if question_id:
-                    question_map[question_id] = title
+                    if question_id:
+                        question_map[question_id] = title
 
         except Exception as e:
             logger.error(f"Error building question map: {e}")
