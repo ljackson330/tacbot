@@ -43,20 +43,18 @@ class TacBot(commands.Bot):
                 logging.error(f"Failed to load cog {cog}: {e}")
 
     async def on_ready(self):
-        logging.info('TacBot has connected to Discord')
+        logging.info(f'TacBot has connected to Discord as {self.user}')
+        logging.info(f'Bot ID: {self.user.id}')
 
 
 async def main():
     bot = TacBot()
 
     try:
-        await bot.start(os.getenv('DISCORD_TOKEN'))
-    except KeyboardInterrupt:
-        logging.info("Bot shutdown requested")
+        async with bot:
+            await bot.start(os.getenv('DISCORD_TOKEN'))
     except Exception as e:
-        logging.error(f"Bot encountered an error: {e}")
-    finally:
-        await bot.close()
+        logging.error(f"TacBot encountered an error: {e}")
 
 
 if __name__ == "__main__":

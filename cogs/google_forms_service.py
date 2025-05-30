@@ -4,6 +4,7 @@ from typing import List, Dict, Any
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
+from googleapiclient.discovery import build
 import logging
 
 logger = logging.getLogger(__name__)
@@ -11,10 +12,12 @@ logger = logging.getLogger(__name__)
 
 class GoogleFormsService:
     def __init__(self):
-        self.scopes = "https://www.googleapis.com/auth/forms.responses.readonly"
-        self.discovery_doc = "https://forms.googleapis.com/$discovery/rest?version=v1"
-        self.credentials_file = os.getenv('GOOGLE_CREDENTIALS_FILE', 'client_secrets.json')
-        self.token_file = os.getenv('GOOGLE_TOKEN_FILE', 'token.json')
+        self.scopes = [
+            "https://www.googleapis.com/auth/forms.responses.readonly",
+            "https://www.googleapis.com/auth/forms.body.readonly"
+        ]
+        self.credentials_file = os.getenv('GOOGLE_CREDENTIALS_FILE')
+        self.token_file = os.getenv('GOOGLE_TOKEN_FILE')
 
         self.service = None
         self._initialize_service()
@@ -37,6 +40,7 @@ class GoogleFormsService:
                 with open(self.token_file, 'w') as token:
                     token.write(creds.to_json())
 
+            self.service = build('forms', 'v1', credentials=creds)
             logger.info("Google Forms service initialized successfully")
 
         except Exception as e:
@@ -54,12 +58,12 @@ class GoogleFormsService:
             List of response dictionaries
         """
         try:
+            def _get_responses():
+                return self.service.forms().responses().list(formId=form_id).execute()
+
             # Run in executor to avoid blocking the event loop
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: self.service.forms().responses().list(formId=form_id).execute()
-            )
+            result = await loop.run_in_executor(None, _get_responses)
 
             return result.get('responses', [])
 
@@ -78,11 +82,11 @@ class GoogleFormsService:
             Form information dictionary
         """
         try:
+            def _get_form_info():
+                return self.service.forms().get(formId=form_id).execute()
+
             loop = asyncio.get_event_loop()
-            result = await loop.run_in_executor(
-                None,
-                lambda: self.service.forms().get(formId=form_id).execute()
-            )
+            result = await loop.run_in_executor(None, _get_form_info)
 
             return result
 

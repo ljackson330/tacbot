@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands, tasks
-from discord import app_commands
+from datetime import datetime
 import os
 import logging
 from typing import Dict, Any
@@ -19,7 +19,7 @@ class ApplicationHandler(commands.Cog):
         # Configuration
         self.channel_id = int(os.getenv('APPLICATION_CHANNEL_ID'))
         self.form_id = os.getenv('GOOGLE_FORM_ID')
-        self.acceptance_threshold = int(os.getenv('ACCEPTANCE_THRESHOLD', '2'))
+        self.acceptance_threshold = int(os.getenv('ACCEPTANCE_THRESHOLD'))
 
         # Question mapping - will be built dynamically from form
         self.question_map = {}
@@ -98,19 +98,34 @@ class ApplicationHandler(commands.Cog):
 
     def _create_application_embed(self, response: Dict[str, Any]) -> discord.Embed:
         """Create a Discord embed for the application"""
-        response_id = response['responseId']
-        timestamp = response['createTime']
+        iso_timestamp = response['createTime']
+        dt = datetime.fromisoformat(iso_timestamp.replace("Z", "+00:00"))
+        unix_ts = int(dt.timestamp())
         answers = response.get('answers', {})
 
+
+        # TODO: unfuck this
+        username = None
+        if answers and not username:
+            first_question_id = list(answers.keys())[0]
+            first_answer_data = answers[first_question_id]
+            if 'textAnswers' in first_answer_data:
+                username = first_answer_data['textAnswers']['answers'][0]['value']
+
         embed = discord.Embed(
-            title="New Application Submission",
-            description=f"**Application ID:** `{response_id}`\n**Submitted:** `{timestamp}`",
+            title=username,
+            description=f"**Submitted:** <t:{unix_ts}:f>",
             color=discord.Color.blue()
         )
 
         # Add form answers as fields
-        for question_id, answer_data in answers.items():
+        for question_id, question_title in self.question_map.items():
+            # TODO: also this
+            if question_id == first_question_id:
+                continue
             question_title = self.question_map.get(question_id, f"Question {question_id}")
+
+            answer_data = answers[question_id]
 
             # Handle different answer types
             if 'textAnswers' in answer_data:
@@ -174,68 +189,39 @@ class ApplicationHandler(commands.Cog):
 
     async def _accept_application(self, message: discord.Message, response_id: str):
         """Accept an application"""
-        # Update embed color to green
         embed = message.embeds[0]
+        now = datetime.now()
+        unix_ts = int(now.timestamp())
+        embed.description=f"**ACCEPTED:** <t:{unix_ts}:f>"
+        embed.remove_footer()
         embed.colour = discord.Color.green()
-        embed.description += "\n\n**ACCEPTED**"
 
         await message.edit(embed=embed)
-
-        # Send acceptance message
-        await message.channel.send(f"Application `{response_id}` has been **ACCEPTED**!")
+        await message.clear_reactions()
 
         # Mark as processed in database
         self.db.set_application_status(response_id, 'accepted')
 
-        # TODO: email sending logic here
+        # TODO: email sending logic here?
 
         logger.info(f"Application {response_id} accepted")
 
     async def _deny_application(self, message: discord.Message, response_id: str):
         """Deny an application"""
-        # Update embed color to red
         embed = message.embeds[0]
+        now = datetime.now()
+        unix_ts = int(now.timestamp())
+        embed.description = f"**DENIED:** <t:{unix_ts}:f>"
+        embed.remove_footer()
         embed.colour = discord.Color.red()
-        embed.description += "\n\n**DENIED**"
 
         await message.edit(embed=embed)
-
-        # Send denial message
-        await message.channel.send(f"Application `{response_id}` has been **DENIED**.")
+        await message.clear_reactions()
 
         # Mark as processed in database
         self.db.set_application_status(response_id, 'denied')
 
         logger.info(f"Application {response_id} denied")
-
-    @app_commands.command(name="appstatus", description="Check the status of an application")
-    @app_commands.describe(response_id="The application response ID to check")
-    async def application_status(self, interaction: discord.Interaction, response_id: str):
-        """Check the status of an application"""
-        if not interaction.user.guild_permissions.manage_messages:
-            await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
-            return
-
-        status = self.db.get_application_status(response_id)
-        if status:
-            await interaction.response.send_message(
-                f"Application `{response_id}` status: **{status['status'].upper()}**")
-        else:
-            await interaction.response.send_message(f"Application `{response_id}` not found.")
-
-    @app_commands.command(name="recheck", description="Manually trigger a check for new responses")
-    async def force_recheck(self, interaction: discord.Interaction):
-        """Manually trigger a check for new responses"""
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
-            return
-
-        await interaction.response.send_message("Checking for new responses...")
-        try:
-            await self.check_new_responses()
-            await interaction.followup.send("Check complete!")
-        except Exception as e:
-            await interaction.followup.send(f"Error during check: {str(e)}")
 
     async def cog_load(self):
         """Sync slash commands when cog is loaded"""

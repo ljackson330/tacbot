@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 class Database:
     def __init__(self, db_path: str = None):
-        self.db_path = db_path or os.getenv('DATABASE_PATH', 'community_bot.db')
+        self.db_path = db_path or os.getenv('DATABASE_PATH')
         self._local = threading.local()
         self._initialize_database()
 
