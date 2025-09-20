@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "tacbot"
 version = "1.0.0"
 description = "Discord bot for Havoc Tactical Group"
-authors = [{name = "Your Name", email = "your.email@example.com"}]
+authors = [{name = "Liam", email = "liamcjackson@pm.me"}]
 license = {text = "MIT"}
 readme = "README.md"
 requires-python = ">=3.8"
@@ -22,13 +22,13 @@ classifiers = [
 ]
 
 dependencies = [
-    "discord.py>=2.3.0",
-    "google-auth>=2.0.0",
-    "google-auth-oauthlib>=1.0.0", 
+    "discord.py>=2.6.0",
+    "google-auth>=2.40.0",
+    "google-auth-oauthlib>=1.2.0",
     "google-auth-httplib2>=0.2.0",
-    "google-api-python-client>=2.0.0",
-    "python-dotenv>=1.0.0",
-    "pytz",
+    "google-api-python-client>=2.182.0",
+    "python-dotenv>=1.1.0",
+    "pytz>=2025.2",
 ]
 
 [project.optional-dependencies]
@@ -45,16 +45,13 @@ dev = [
     "pytest-cov",
     "black",
     "flake8",
-    "mypy",
+    "pre-commit"
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/yourusername/tacbot"
-"Bug Reports" = "https://github.com/yourusername/tacbot/issues"
-"Source" = "https://github.com/yourusername/tacbot"
-
-[project.scripts]
-tacbot = "bot:main"
+"Homepage" = "https://github.com/ljackson330/tacbot"
+"Bug Reports" = "https://github.com/ljackson330/tacbot/issues"
+"Source" = "https://github.com/ljackson330/tacbot"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -69,7 +66,7 @@ addopts = "--cov=cogs --cov-report=html --cov-report=term-missing"
 asyncio_mode = "auto"
 
 [tool.black]
-line-length = 100
+line-length = 150
 target-version = ['py38']
 include = '\.pyi?$'
 extend-exclude = '''
@@ -85,9 +82,3 @@ extend-exclude = '''
   | dist
 )/
 '''
-
-[tool.mypy]
-python_version = "3.8"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = true

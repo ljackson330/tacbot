@@ -1,10 +1,7 @@
 import unittest
-import asyncio
 import tempfile
 import os
-from unittest.mock import AsyncMock, MagicMock, patch
 from cogs.database import Database
-from cogs.application_handler import ApplicationHandler
 
 
 class TestIntegration(unittest.TestCase):
@@ -12,7 +9,7 @@ class TestIntegration(unittest.TestCase):
 
     def setUp(self):
         """Set up integration test environment"""
-        self.temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+        self.temp_db = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
         self.temp_db.close()
         self.db = Database(self.temp_db.name)
 
@@ -39,31 +36,31 @@ class TestIntegration(unittest.TestCase):
         self.db.store_application_message(response_id, message_id, channel_id)
         app_data = self.db.get_application_by_message_id(message_id)
         self.assertIsNotNone(app_data)
-        self.assertEqual(app_data['status'], 'pending')
+        self.assertEqual(app_data["status"], "pending")
 
         # 2. Add votes (2 approvals, 1 denial)
-        self.db.add_vote(response_id, user_id_1, 'approve')
-        self.db.add_vote(response_id, user_id_2, 'approve')
-        self.db.add_vote(response_id, user_id_3, 'deny')
+        self.db.add_vote(response_id, user_id_1, "approve")
+        self.db.add_vote(response_id, user_id_2, "approve")
+        self.db.add_vote(response_id, user_id_3, "deny")
 
         # 3. Check vote counts
         counts = self.db.get_vote_counts(response_id)
-        self.assertEqual(counts['approve'], 2)
-        self.assertEqual(counts['deny'], 1)
+        self.assertEqual(counts["approve"], 2)
+        self.assertEqual(counts["deny"], 1)
 
         # 4. Process application (simulate reaching threshold)
-        self.db.set_application_status(response_id, 'accepted')
+        self.db.set_application_status(response_id, "accepted")
 
         # 5. Verify final state
         final_data = self.db.get_application_status(response_id)
-        self.assertEqual(final_data['status'], 'accepted')
+        self.assertEqual(final_data["status"], "accepted")
 
         # 6. Check statistics
         stats = self.db.get_application_stats()
-        self.assertEqual(stats['total'], 1)
-        self.assertEqual(stats['accepted'], 1)
-        self.assertEqual(stats['denied'], 0)
-        self.assertEqual(stats['pending'], 0)
+        self.assertEqual(stats["total"], 1)
+        self.assertEqual(stats["accepted"], 1)
+        self.assertEqual(stats["denied"], 0)
+        self.assertEqual(stats["pending"], 0)
 
     def test_concurrent_voting(self):
         """Test concurrent voting operations"""
@@ -76,7 +73,6 @@ class TestIntegration(unittest.TestCase):
 
         # Simulate concurrent voting
         import threading
-        import time
 
         results = []
 
@@ -92,7 +88,7 @@ class TestIntegration(unittest.TestCase):
         threads = []
         for i in range(5):
             user_id = 1000 + i
-            vote_type = 'approve' if i % 2 == 0 else 'deny'
+            vote_type = "approve" if i % 2 == 0 else "deny"
             thread = threading.Thread(target=vote_worker, args=(user_id, vote_type))
             threads.append(thread)
 

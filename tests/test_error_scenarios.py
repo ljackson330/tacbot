@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch, MagicMock, mock_open
+from unittest.mock import patch, MagicMock
 from cogs.database import Database
 from cogs.google_forms_service import GoogleFormsService
 import tempfile
@@ -12,7 +12,7 @@ class TestErrorScenarios(unittest.TestCase):
 
     def test_database_corruption_handling(self):
         """Test handling of database corruption"""
-        temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+        temp_db = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
         temp_db.close()
 
         try:
@@ -21,8 +21,8 @@ class TestErrorScenarios(unittest.TestCase):
             db.close()
 
             # Write garbage to the database file
-            with open(temp_db.name, 'wb') as f:
-                f.write(b'corrupted_data_not_sqlite')
+            with open(temp_db.name, "wb") as f:
+                f.write(b"corrupted_data_not_sqlite")
 
             # Try to use corrupted database
             with self.assertRaises(Exception):
@@ -33,38 +33,40 @@ class TestErrorScenarios(unittest.TestCase):
             if os.path.exists(temp_db.name):
                 os.unlink(temp_db.name)
 
-    @patch('cogs.google_forms_service.build')
-    @patch('cogs.google_forms_service.InstalledAppFlow.from_client_secrets_file')
-    @patch('cogs.google_forms_service.Credentials.from_authorized_user_file')
-    @patch('cogs.google_forms_service.os.path.exists')
+    @patch("cogs.google_forms_service.build")
+    @patch("cogs.google_forms_service.InstalledAppFlow.from_client_secrets_file")
+    @patch("cogs.google_forms_service.Credentials.from_authorized_user_file")
+    @patch("cogs.google_forms_service.os.path.exists")
     def test_missing_credentials_file(self, mock_exists, mock_from_file, mock_flow, mock_build):
         """Test handling of missing credentials file"""
 
-        # Mock file existence to return False for token file, True for credentials
+        # Mock file existence to return False for token file, True for
+        # credentials
         def exists_side_effect(path):
-            if 'token.json' in path:
+            if "token.json" in path:
                 return False  # Token file doesn't exist
-            elif 'credentials.json' in path:
+            elif "credentials.json" in path:
                 return False  # Credentials file doesn't exist
             return True
 
         mock_exists.side_effect = exists_side_effect
 
-        # Mock the flow to raise FileNotFoundError when credentials file is missing
+        # Mock the flow to raise FileNotFoundError when credentials file is
+        # missing
         mock_flow.side_effect = FileNotFoundError("No such file or directory: 'nonexistent.json'")
 
         env_vars = {
-            'GOOGLE_CREDENTIALS_FILE': 'nonexistent.json',
-            'GOOGLE_TOKEN_FILE': 'token.json'
+            "GOOGLE_CREDENTIALS_FILE": "nonexistent.json",
+            "GOOGLE_TOKEN_FILE": "token.json",
         }
 
-        with patch.dict('os.environ', env_vars):
+        with patch.dict("os.environ", env_vars):
             with self.assertRaises(FileNotFoundError):
                 GoogleFormsService()
 
-    @patch('cogs.google_forms_service.build')
-    @patch('cogs.google_forms_service.Credentials.from_authorized_user_file')
-    @patch('cogs.google_forms_service.os.path.exists')
+    @patch("cogs.google_forms_service.build")
+    @patch("cogs.google_forms_service.Credentials.from_authorized_user_file")
+    @patch("cogs.google_forms_service.os.path.exists")
     def test_invalid_credentials_format(self, mock_exists, mock_from_file, mock_build):
         """Test handling of invalid credentials format"""
 
@@ -75,18 +77,18 @@ class TestErrorScenarios(unittest.TestCase):
         mock_from_file.side_effect = ValueError("Invalid credentials format")
 
         env_vars = {
-            'GOOGLE_CREDENTIALS_FILE': 'credentials.json',
-            'GOOGLE_TOKEN_FILE': 'token.json'
+            "GOOGLE_CREDENTIALS_FILE": "credentials.json",
+            "GOOGLE_TOKEN_FILE": "token.json",
         }
 
-        with patch.dict('os.environ', env_vars):
+        with patch.dict("os.environ", env_vars):
             with self.assertRaises(Exception):  # Could be ValueError or any exception during initialization
                 GoogleFormsService()
 
-    @patch('cogs.google_forms_service.build')
-    @patch('cogs.google_forms_service.Request')
-    @patch('cogs.google_forms_service.Credentials.from_authorized_user_file')
-    @patch('cogs.google_forms_service.os.path.exists')
+    @patch("cogs.google_forms_service.build")
+    @patch("cogs.google_forms_service.Request")
+    @patch("cogs.google_forms_service.Credentials.from_authorized_user_file")
+    @patch("cogs.google_forms_service.os.path.exists")
     def test_expired_credentials_refresh_failure(self, mock_exists, mock_from_file, mock_request, mock_build):
         """Test handling of expired credentials that fail to refresh"""
 
@@ -103,11 +105,11 @@ class TestErrorScenarios(unittest.TestCase):
         mock_from_file.return_value = mock_creds
 
         env_vars = {
-            'GOOGLE_CREDENTIALS_FILE': 'credentials.json',
-            'GOOGLE_TOKEN_FILE': 'token.json'
+            "GOOGLE_CREDENTIALS_FILE": "credentials.json",
+            "GOOGLE_TOKEN_FILE": "token.json",
         }
 
-        with patch.dict('os.environ', env_vars):
+        with patch.dict("os.environ", env_vars):
             with self.assertRaises(Exception):
                 GoogleFormsService()
 
@@ -122,7 +124,9 @@ class TestErrorScenarios(unittest.TestCase):
         invalid_ids = [
             "123",  # Too short (less than 17 digits)
             "abc123456789012345",  # Contains letters
-            "123 456 789 012 345",  # Contains spaces (digits get cleaned but still too short after cleaning)
+            "123 456 789 012 345",
+            # Contains spaces (digits get cleaned but still too short after
+            # cleaning)
             "",  # Empty string
             None,  # None value
             "12345678901234567890123456789",  # Too long (more than 20 digits)
@@ -167,7 +171,8 @@ class TestErrorScenarios(unittest.TestCase):
         self.assertFalse(handler._validate_discord_id(123456789012345678))
 
         # Test negative string number - actually becomes valid because implementation
-        # strips non-digits, so "-123456789012345678" becomes "123456789012345678"
+        # strips non-digits, so "-123456789012345678" becomes
+        # "123456789012345678"
         self.assertTrue(handler._validate_discord_id("-123456789012345678"))
 
         # Test strings that become invalid after digit extraction
@@ -204,7 +209,7 @@ class TestErrorScenarios(unittest.TestCase):
     def test_database_connection_failures(self):
         """Test database connection failure scenarios"""
 
-        with patch('cogs.database.sqlite3.connect') as mock_connect:
+        with patch("cogs.database.sqlite3.connect") as mock_connect:
             # Test connection failure
             mock_connect.side_effect = sqlite3.OperationalError("Unable to open database file")
 
@@ -234,6 +239,7 @@ class TestErrorScenarios(unittest.TestCase):
             self.assertEqual(responses, [])
 
         import asyncio
+
         asyncio.run(test_api_failure())
 
     def test_form_data_parsing_edge_cases(self):
@@ -241,32 +247,31 @@ class TestErrorScenarios(unittest.TestCase):
         from cogs.application_handler import ApplicationHandler
 
         handler = ApplicationHandler.__new__(ApplicationHandler)
-        handler.discord_id_question = 'entry.123456'
+        handler.discord_id_question = "entry.123456"
 
         # Test various malformed answer structures
         edge_cases = [
             # Missing textAnswers - should return None
-            ({'entry.123456': {}}, None),
-
+            ({"entry.123456": {}}, None),
             # Empty answers array - should return None
-            ({'entry.123456': {'textAnswers': {'answers': []}}}, None),
-
-            # Missing value field - should return None (causes KeyError which gets caught)
-            ({'entry.123456': {'textAnswers': {'answers': [{}]}}}, None),
-
-            # Non-string value - should return None (causes AttributeError on .strip())
-            ({'entry.123456': {'textAnswers': {'answers': [{'value': 123456789012345678}]}}}, None),
-
+            ({"entry.123456": {"textAnswers": {"answers": []}}}, None),
+            # Missing value field - should return None (causes KeyError which
+            # gets caught)
+            ({"entry.123456": {"textAnswers": {"answers": [{}]}}}, None),
+            # Non-string value - should return None (causes AttributeError on
+            # .strip())
+            ({"entry.123456": {"textAnswers": {"answers": [{"value": 123456789012345678}]}}}, None),
             # Valid string Discord ID - should succeed
-            ({'entry.123456': {'textAnswers': {'answers': [{'value': '123456789012345678'}]}}},
-             ('123456789012345678', 'entry.123456')),
-
+            (
+                {"entry.123456": {"textAnswers": {"answers": [{"value": "123456789012345678"}]}}},
+                ("123456789012345678", "entry.123456"),
+            ),
             # Multiple answers where first is invalid, second is valid - should return None
             # because the implementation processes first answer and returns on error
-            ({'entry.123456': {'textAnswers': {'answers': [
-                {'value': 'invalid'},
-                {'value': '123456789012345678'}
-            ]}}}, None),
+            (
+                {"entry.123456": {"textAnswers": {"answers": [{"value": "invalid"}, {"value": "123456789012345678"}]}}},
+                None,
+            ),
         ]
 
         for i, (answers, expected_result) in enumerate(edge_cases):
@@ -283,41 +288,41 @@ class TestErrorScenarios(unittest.TestCase):
         from cogs.application_handler import ApplicationHandler
 
         handler = ApplicationHandler.__new__(ApplicationHandler)
-        handler.discord_id_question = 'entry.123456'  # This won't be found
+        handler.discord_id_question = "entry.123456"  # This won't be found
 
         # Test fallback search through all answers when direct lookup fails
         answers = {
-            'entry.999999': {'textAnswers': {'answers': [{'value': '123456789012345678'}]}},
-            'entry.888888': {'textAnswers': {'answers': [{'value': 'not_a_discord_id'}]}},
+            "entry.999999": {"textAnswers": {"answers": [{"value": "123456789012345678"}]}},
+            "entry.888888": {"textAnswers": {"answers": [{"value": "not_a_discord_id"}]}},
         }
 
         result = handler._extract_discord_id(answers)
         # Should find the valid Discord ID in the fallback search
         self.assertIsNotNone(result)
-        self.assertEqual(result[0], '123456789012345678')
-        self.assertEqual(result[1], 'entry.999999')
+        self.assertEqual(result[0], "123456789012345678")
+        self.assertEqual(result[1], "entry.999999")
 
     def test_form_data_extraction_with_various_question_formats(self):
         """Test Discord ID extraction with various question ID formats"""
         from cogs.application_handler import ApplicationHandler
 
         handler = ApplicationHandler.__new__(ApplicationHandler)
-        handler.discord_id_question = '123456'  # Just the number part
+        handler.discord_id_question = "123456"  # Just the number part
 
         # Test different formats that should match
         test_cases = [
             # Direct match with configured question ID
-            {'123456': {'textAnswers': {'answers': [{'value': '123456789012345678'}]}}},
+            {"123456": {"textAnswers": {"answers": [{"value": "123456789012345678"}]}}},
             # With entry. prefix
-            {'entry.123456': {'textAnswers': {'answers': [{'value': '123456789012345678'}]}}},
+            {"entry.123456": {"textAnswers": {"answers": [{"value": "123456789012345678"}]}}},
         ]
 
         for i, answers in enumerate(test_cases):
             with self.subTest(case=i):
                 result = handler._extract_discord_id(answers)
                 self.assertIsNotNone(result, f"Case {i} should find a valid Discord ID")
-                self.assertEqual(result[0], '123456789012345678')
+                self.assertEqual(result[0], "123456789012345678")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -1,7 +1,5 @@
 import unittest
-import asyncio
-from unittest.mock import MagicMock, AsyncMock, patch
-import discord
+from unittest.mock import MagicMock, patch
 from cogs.chat_commands import ChatCommands
 
 
@@ -12,19 +10,19 @@ class TestChatCommands(unittest.TestCase):
         self.mock_bot = MagicMock()
 
         env_vars = {
-            'GOOGLE_FORM_ID': 'test_form_id',
-            'DISCORD_ID_ENTRY': 'entry.123456',
-            'ADMIN_ROLE_ID': '999999999',
-            'GUILD_ID': '123456789'
+            "GOOGLE_FORM_ID": "test_form_id",
+            "DISCORD_ID_ENTRY": "entry.123456",
+            "ADMIN_ROLE_ID": "999999999",
+            "GUILD_ID": "123456789",
         }
 
-        with patch.dict('os.environ', env_vars):
+        with patch.dict("os.environ", env_vars):
             self.commands = ChatCommands(self.mock_bot)
 
     def test_config_loading(self):
         """Test configuration loading"""
-        self.assertEqual(self.commands.form_id, 'test_form_id')
-        self.assertEqual(self.commands.discord_id_entry, 'entry.123456')
+        self.assertEqual(self.commands.form_id, "test_form_id")
+        self.assertEqual(self.commands.discord_id_entry, "entry.123456")
         self.assertEqual(self.commands.admin_role_id, 999999999)
         self.assertIsNotNone(self.commands.form_url)
 

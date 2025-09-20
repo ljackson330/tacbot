@@ -3,7 +3,6 @@ from discord.ext import commands, tasks
 from datetime import datetime
 import os
 import logging
-import asyncio
 import time
 from typing import Dict, Any, Optional, Tuple
 from .google_forms_service import GoogleFormsService
@@ -110,7 +109,10 @@ class ApplicationHandler(commands.Cog):
             try:
                 value = cast(raw_value) if raw_value is not None else None
             except (ValueError, TypeError) as e:
-                logger.error(f"Invalid value for {env_var}: {raw_value!r} ({e})")
+                logger.error(
+                    f"Invalid value for {env_var}: {
+                        raw_value!r} ({e})"
+                )
                 raise
             setattr(self, attr, value)
 
@@ -158,7 +160,7 @@ class ApplicationHandler(commands.Cog):
             responses = await self.google_service.get_form_responses(self.form_id)
 
             for response in responses:
-                response_id = response['responseId']
+                response_id = response["responseId"]
 
                 # Check if we've already processed this response
                 if not self.db.is_response_processed(response_id):
@@ -193,7 +195,7 @@ class ApplicationHandler(commands.Cog):
 
     async def _process_new_response(self, response: Dict[str, Any]):
         """Process a new form response."""
-        response_id = response['responseId']
+        response_id = response["responseId"]
 
         try:
             guild = self.bot.get_guild(self.guild_id)
@@ -203,7 +205,10 @@ class ApplicationHandler(commands.Cog):
 
             channel = guild.get_channel(self.channel_id)
             if not channel:
-                logger.error(f"Could not find channel with ID {self.channel_id}")
+                logger.error(
+                    f"Could not find channel with ID {
+                        self.channel_id}"
+                )
                 return
 
             embed = await self._create_application_embed(response, guild)
@@ -236,8 +241,8 @@ class ApplicationHandler(commands.Cog):
             for question_id in possible_ids:
                 if question_id in answers:
                     answer_data = answers[question_id]
-                    if 'textAnswers' in answer_data and answer_data['textAnswers']['answers']:
-                        discord_id = answer_data['textAnswers']['answers'][0]['value'].strip()
+                    if "textAnswers" in answer_data and answer_data["textAnswers"]["answers"]:
+                        discord_id = answer_data["textAnswers"]["answers"][0]["value"].strip()
                         if self._validate_discord_id(discord_id):
                             logger.debug(f"Found Discord ID using question_id: {question_id}")
                             return discord_id, question_id
@@ -245,8 +250,8 @@ class ApplicationHandler(commands.Cog):
             # If direct lookup fails, search through all answers
             logger.debug("Direct lookup failed, searching all answers for Discord ID pattern")
             for question_id, answer_data in answers.items():
-                if 'textAnswers' in answer_data and answer_data['textAnswers']['answers']:
-                    value = answer_data['textAnswers']['answers'][0]['value'].strip()
+                if "textAnswers" in answer_data and answer_data["textAnswers"]["answers"]:
+                    value = answer_data["textAnswers"]["answers"][0]["value"].strip()
                     if self._validate_discord_id(value):
                         logger.debug(f"Found Discord ID pattern in question_id: {question_id}")
                         return value, question_id
@@ -263,8 +268,9 @@ class ApplicationHandler(commands.Cog):
         if not isinstance(discord_id, str):
             return False
 
-        # Remove any whitespace and non-digit characters except for the ID itself
-        cleaned_id = ''.join(c for c in discord_id if c.isdigit())
+        # Remove any whitespace and non-digit characters except for the ID
+        # itself
+        cleaned_id = "".join(c for c in discord_id if c.isdigit())
 
         # Discord IDs are exactly 17-20 digits (snowflakes)
         if not (17 <= len(cleaned_id) <= 20):
@@ -282,21 +288,33 @@ class ApplicationHandler(commands.Cog):
         """Get Discord member by ID from the specified guild."""
         try:
             discord_id_int = int(discord_id)
-            logger.debug(f"Looking for Discord ID: {discord_id_int} in guild: {guild.name}")
+            logger.debug(
+                f"Looking for Discord ID: {discord_id_int} in guild: {
+                    guild.name}"
+            )
 
             # Try get_member first (cached members only)
             member = guild.get_member(discord_id_int)
             if member:
-                logger.debug(f"Found member via get_member: {member.display_name}")
+                logger.debug(
+                    f"Found member via get_member: {
+                        member.display_name}"
+                )
                 return member
 
             # If not in cache, try fetching from Discord API
             try:
                 member = await guild.fetch_member(discord_id_int)
-                logger.debug(f"Found member via fetch_member: {member.display_name}")
+                logger.debug(
+                    f"Found member via fetch_member: {
+                        member.display_name}"
+                )
                 return member
             except discord.NotFound:
-                logger.warning(f"Member {discord_id_int} not found in guild {guild.name}")
+                logger.warning(
+                    f"Member {discord_id_int} not found in guild {
+                        guild.name}"
+                )
                 return None
             except discord.HTTPException as e:
                 logger.error(f"HTTP error fetching member {discord_id_int}: {e}")
@@ -312,11 +330,11 @@ class ApplicationHandler(commands.Cog):
     async def _create_application_embed(self, response: Dict[str, Any], guild: discord.Guild) -> discord.Embed:
         """Create embed for application display."""
         # Parse timestamp
-        iso_timestamp = response['createTime']
+        iso_timestamp = response["createTime"]
         dt = datetime.fromisoformat(iso_timestamp.replace("Z", "+00:00"))
         unix_ts = int(dt.timestamp())
 
-        answers = response.get('answers', {})
+        answers = response.get("answers", {})
         discord_data = self._extract_discord_id(answers)
 
         discord_id = None
@@ -332,18 +350,14 @@ class ApplicationHandler(commands.Cog):
         # Build the embed
         if member:
             title = f"Application from {member.display_name}"
-            thumbnail_url = member.display_avatar.url if hasattr(member, 'display_avatar') else None
+            thumbnail_url = member.display_avatar.url if hasattr(member, "display_avatar") else None
         else:
             title = "Application from Unknown User"
             if discord_id:
                 title += f" (ID: {discord_id})"
             thumbnail_url = None
 
-        embed = discord.Embed(
-            title=title,
-            description=f"**Submitted:** <t:{unix_ts}:f>",
-            color=discord.Color.blue()
-        )
+        embed = discord.Embed(title=title, description=f"**Submitted:** <t:{unix_ts}:f>", color=discord.Color.blue())
 
         # Set thumbnail if available
         if thumbnail_url:
@@ -359,8 +373,8 @@ class ApplicationHandler(commands.Cog):
                 answer_data = answers[question_id]
 
                 # Handle different answer types and sanitize
-                if 'textAnswers' in answer_data:
-                    raw_answers = [a['value'] for a in answer_data['textAnswers']['answers']]
+                if "textAnswers" in answer_data:
+                    raw_answers = [a["value"] for a in answer_data["textAnswers"]["answers"]]
                     answer_text = ", ".join(self._sanitize_text(ans) for ans in raw_answers)
                 else:
                     answer_text = self._sanitize_text(str(answer_data))
@@ -370,15 +384,11 @@ class ApplicationHandler(commands.Cog):
                 embed.add_field(
                     name=self._sanitize_text(question_title),
                     value=answer_text or "*No answer provided*",
-                    inline=False
+                    inline=False,
                 )
 
         # Add initial vote status
-        embed.add_field(
-            name="Votes",
-            value="**Approvals (0):** None\n**Denials (0):** None",
-            inline=False
-        )
+        embed.add_field(name="Votes", value="**Approvals (0):** None\n**Denials (0):** None", inline=False)
 
         return embed
 
@@ -388,13 +398,14 @@ class ApplicationHandler(commands.Cog):
             text = str(text)
 
         # Remove or escape potential markdown/mentions
-        text = text.replace('@', '@\u200b')  # Zero-width space to break mentions
-        text = text.replace('`', '`\u200b')  # Break code blocks
+        # Zero-width space to break mentions
+        text = text.replace("@", "@\u200b")
+        text = text.replace("`", "`\u200b")  # Break code blocks
 
         # Additional sanitization for potential abuse
-        text = text.replace('http://', 'http[://]')  # Break HTTP links
-        text = text.replace('https://', 'https[://]')  # Break HTTPS links
-        text = text.replace('discord.gg/', 'discord[.]gg/')  # Break Discord invites
+        text = text.replace("http://", "http[://]")  # Break HTTP links
+        text = text.replace("https://", "https[://]")  # Break HTTPS links
+        text = text.replace("discord.gg/", "discord[.]gg/")  # Break Discord invites
 
         return text.strip()
 
@@ -404,10 +415,7 @@ class ApplicationHandler(commands.Cog):
 
         # Check if application is being processed
         if response_id in self._processing_applications:
-            await interaction.response.send_message(
-                "This application is currently being processed. Please wait.",
-                ephemeral=True
-            )
+            await interaction.response.send_message("This application is currently being processed. Please wait.", ephemeral=True)
             return
 
         try:
@@ -443,29 +451,31 @@ class ApplicationHandler(commands.Cog):
         except Exception as e:
             logger.error(f"Error handling vote for application {response_id}: {e}")
             if not interaction.response.is_done():
-                await interaction.response.send_message(
-                    "An error occurred while processing your vote.",
-                    ephemeral=True
-                )
+                await interaction.response.send_message("An error occurred while processing your vote.", ephemeral=True)
 
     def _is_decisive_vote(self, vote_counts: Dict[str, int], vote_type: str) -> bool:
         """Check if this vote reaches the threshold and is the deciding vote."""
-        approvals = vote_counts.get('approve', 0)
-        denials = vote_counts.get('deny', 0)
+        approvals = vote_counts.get("approve", 0)
+        denials = vote_counts.get("deny", 0)
 
-        if vote_type == 'approve' and approvals >= self.acceptance_threshold:
+        if vote_type == "approve" and approvals >= self.acceptance_threshold:
             # Check if this was the decisive vote (one less before this vote)
             return (approvals - 1) < self.acceptance_threshold
-        elif vote_type == 'deny' and denials >= self.denial_threshold:
+        elif vote_type == "deny" and denials >= self.denial_threshold:
             # Check if this was the decisive vote
             return (denials - 1) < self.denial_threshold
 
         return False
 
-    async def _handle_decisive_vote(self, interaction: discord.Interaction, response_id: str,
-                                    vote_type: str, vote_counts: Dict[str, int]):
+    async def _handle_decisive_vote(
+        self,
+        interaction: discord.Interaction,
+        response_id: str,
+        vote_type: str,
+        vote_counts: Dict[str, int],
+    ):
         """Handle a decisive vote with undo option."""
-        decision = "accept" if vote_type == 'approve' else "deny"
+        decision = "accept" if vote_type == "approve" else "deny"
 
         # Create undo button
         view = UndoButton(interaction.user.id, vote_type)
@@ -474,7 +484,7 @@ class ApplicationHandler(commands.Cog):
             undo_msg = await interaction.followup.send(
                 f"{interaction.user.mention}, your vote was decisive and will **{decision}** this application. "
                 f"You have 10 seconds to cancel if this was a mistake.",
-                view=view
+                view=view,
             )
 
             # Wait for either button click or timeout
@@ -506,11 +516,10 @@ class ApplicationHandler(commands.Cog):
         except Exception as e:
             logger.error(f"Error in decisive vote handling: {e}")
 
-    async def _check_auto_process(self, message: discord.Message, response_id: str,
-                                  vote_counts: Dict[str, int]):
+    async def _check_auto_process(self, message: discord.Message, response_id: str, vote_counts: Dict[str, int]):
         """Check if application should be auto-processed based on vote counts."""
-        approvals = vote_counts.get('approve', 0)
-        denials = vote_counts.get('deny', 0)
+        approvals = vote_counts.get("approve", 0)
+        denials = vote_counts.get("deny", 0)
 
         if approvals >= self.acceptance_threshold:
             await self._process_application(message, response_id, "accept")
@@ -527,13 +536,14 @@ class ApplicationHandler(commands.Cog):
             embed = message.embeds[0]
 
             # Build vote display
-            approvers = [f"<@{vote['user_id']}>" for vote in votes if vote['vote_type'] == 'approve']
-            deniers = [f"<@{vote['user_id']}>" for vote in votes if vote['vote_type'] == 'deny']
+            approvers = [f"<@{vote['user_id']}>" for vote in votes if vote["vote_type"] == "approve"]
+            deniers = [f"<@{vote['user_id']}>" for vote in votes if vote["vote_type"] == "deny"]
 
-            approvals_count = vote_counts.get('approve', 0)
-            denials_count = vote_counts.get('deny', 0)
+            approvals_count = vote_counts.get("approve", 0)
+            denials_count = vote_counts.get("deny", 0)
 
-            vote_info = f"**Approvals ({approvals_count}):** {', '.join(approvers) if approvers else 'None'}\n"
+            vote_info = f"**Approvals ({approvals_count}):** {
+                ', '.join(approvers) if approvers else 'None'}\n"
             vote_info += f"**Denials ({denials_count}):** {', '.join(deniers) if deniers else 'None'}"
 
             # Update or add vote field
@@ -560,7 +570,7 @@ class ApplicationHandler(commands.Cog):
         try:
             # Check if already processed
             app_data = self.db.get_application_by_message_id(message.id)
-            if app_data and app_data.get('status') in ['accepted', 'denied']:
+            if app_data and app_data.get("status") in ["accepted", "denied"]:
                 return
 
             guild = self.bot.get_guild(self.guild_id)
@@ -608,7 +618,10 @@ class ApplicationHandler(commands.Cog):
                 await member.add_roles(role, reason=f"Application {response_id} accepted")
                 logger.info(f"Added role {role.name} to {member.display_name}")
             except discord.HTTPException as e:
-                logger.error(f"Failed to add role to {member.display_name}: {e}")
+                logger.error(
+                    f"Failed to add role to {
+                        member.display_name}: {e}"
+                )
 
         # Send notifications
         await self._send_notifications(member, True, guild.name)
@@ -624,8 +637,7 @@ class ApplicationHandler(commands.Cog):
             except discord.HTTPException as e:
                 logger.error(f"Failed to kick {member.display_name}: {e}")
 
-    async def _get_member_and_role(self, guild: discord.Guild, response_id: str) -> Tuple[
-        Optional[discord.Member], Optional[discord.Role]]:
+    async def _get_member_and_role(self, guild: discord.Guild, response_id: str) -> Tuple[Optional[discord.Member], Optional[discord.Role]]:
         """Get the Discord member and role for application processing."""
         try:
             if self._is_rate_limited():
@@ -634,13 +646,13 @@ class ApplicationHandler(commands.Cog):
 
             self._record_api_call()
             responses = await self.google_service.get_form_responses(self.form_id)
-            target_response = next((r for r in responses if r['responseId'] == response_id), None)
+            target_response = next((r for r in responses if r["responseId"] == response_id), None)
 
             if not target_response:
                 logger.error(f"Could not find response with ID {response_id}")
                 return None, None
 
-            answers = target_response.get('answers', {})
+            answers = target_response.get("answers", {})
             discord_data = self._extract_discord_id(answers)
 
             if not discord_data:
@@ -656,7 +668,10 @@ class ApplicationHandler(commands.Cog):
 
             role = guild.get_role(self.member_role_id)
             if not role:
-                logger.error(f"Could not find role with ID {self.member_role_id}")
+                logger.error(
+                    f"Could not find role with ID {
+                        self.member_role_id}"
+                )
                 return member, None
 
             return member, role
@@ -676,20 +691,26 @@ class ApplicationHandler(commands.Cog):
             try:
                 message = f"Your application to **{guild_name}** has been **accepted**! You now have access to the server."
                 await member.send(message)
-                logger.info(f"Successfully notified {member.display_name} of acceptance")
+                logger.info(
+                    f"Successfully notified {
+                        member.display_name} of acceptance"
+                )
             except discord.Forbidden:
-                logger.warning(f"Could not DM {member.display_name} about acceptance")
+                logger.warning(
+                    f"Could not DM {
+                        member.display_name} about acceptance"
+                )
 
             # Post welcome message in general
             general_channel = guild.get_channel(self.general_channel_id)
             if general_channel:
                 try:
-                    welcome_message = (
-                        f"Welcome to {guild_name}, {member.mention}! "
-                        f"Please reach out to an admin if you have any questions."
-                    )
+                    welcome_message = f"Welcome to {guild_name}, {member.mention}! " f"Please reach out to an admin if you have any questions."
                     await general_channel.send(welcome_message)
-                    logger.info(f"Sent welcome message for {member.display_name}")
+                    logger.info(
+                        f"Sent welcome message for {
+                            member.display_name}"
+                    )
                 except discord.HTTPException as e:
                     logger.error(f"Failed to send welcome message: {e}")
 
@@ -700,15 +721,12 @@ class ApplicationHandler(commands.Cog):
         try:
             stats = self.db.get_application_stats()
 
-            embed = discord.Embed(
-                title="Application Statistics",
-                color=discord.Color.blue()
-            )
+            embed = discord.Embed(title="Application Statistics", color=discord.Color.blue())
 
-            embed.add_field(name="Total Applications", value=stats.get('total', 0), inline=True)
-            embed.add_field(name="Accepted", value=stats.get('accepted', 0), inline=True)
-            embed.add_field(name="Denied", value=stats.get('denied', 0), inline=True)
-            embed.add_field(name="Pending", value=stats.get('pending', 0), inline=True)
+            embed.add_field(name="Total Applications", value=stats.get("total", 0), inline=True)
+            embed.add_field(name="Accepted", value=stats.get("accepted", 0), inline=True)
+            embed.add_field(name="Denied", value=stats.get("denied", 0), inline=True)
+            embed.add_field(name="Pending", value=stats.get("pending", 0), inline=True)
 
             await ctx.send(embed=embed)
 

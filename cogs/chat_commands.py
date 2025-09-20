@@ -19,32 +19,33 @@ class ChatCommands(commands.Cog):
     def _load_config(self):
         """Load configuration from environment variables."""
         # Form configuration
-        self.form_id = os.getenv('GOOGLE_FORM_ID')
-        self.discord_id_entry = os.getenv('DISCORD_ID_ENTRY')
+        self.form_id = os.getenv("GOOGLE_FORM_ID")
+        self.discord_id_entry = os.getenv("DISCORD_ID_ENTRY")
 
         # Admin role configuration
-        admin_role_env = os.getenv('ADMIN_ROLE_ID')
+        admin_role_env = os.getenv("ADMIN_ROLE_ID")
         self.admin_role_id = int(admin_role_env) if admin_role_env else None
 
         # Event configuration (for admin commands)
-        guild_id_env = os.getenv('GUILD_ID')
+        guild_id_env = os.getenv("GUILD_ID")
         self.guild_id = int(guild_id_env) if guild_id_env else None
 
-        timezone_str = os.getenv('TIMEZONE', 'US/Eastern')
+        timezone_str = os.getenv("TIMEZONE", "US/Eastern")
         try:
             self.timezone = pytz.timezone(timezone_str)
         except pytz.UnknownTimeZoneError:
             logger.warning(f"Unknown timezone {timezone_str}, defaulting to US/Eastern")
-            self.timezone = pytz.timezone('US/Eastern')
+            self.timezone = pytz.timezone("US/Eastern")
 
-        self.create_day = int(os.getenv('EVENT_CREATE_DAY', '0'))  # Monday
-        self.create_hour = int(os.getenv('EVENT_CREATE_HOUR', '20'))  # 8 PM
-        self.delete_day = int(os.getenv('EVENT_DELETE_DAY', '6'))  # Sunday
-        self.delete_hour = int(os.getenv('EVENT_DELETE_HOUR', '11'))  # Midnight
+        self.create_day = int(os.getenv("EVENT_CREATE_DAY", "0"))  # Monday
+        self.create_hour = int(os.getenv("EVENT_CREATE_HOUR", "20"))  # 8 PM
+        self.delete_day = int(os.getenv("EVENT_DELETE_DAY", "6"))  # Sunday
+        self.delete_hour = int(os.getenv("EVENT_DELETE_HOUR", "11"))  # Midnight
 
         # Build form URL from ID
         if self.form_id:
-            self.form_url = f"https://docs.google.com/forms/d/{self.form_id}/viewform"
+            self.form_url = f"https://docs.google.com/forms/d/{
+                self.form_id}/viewform"
         else:
             self.form_url = None
             logger.warning("GOOGLE_FORM_ID environment variable not set")
@@ -68,26 +69,18 @@ class ChatCommands(commands.Cog):
         """
         try:
             if not self.form_url:
-                await interaction.response.send_message(
-                    "Application form is not configured. Please ping @kanuk",
-                    ephemeral=True
-                )
+                await interaction.response.send_message("Application form is not configured. Please ping @kanuk", ephemeral=True)
                 return
 
             if not self.discord_id_entry:
-                await interaction.response.send_message(
-                    "Discord ID entry field is not configured. Please ping @kanuk",
-                    ephemeral=True
-                )
+                await interaction.response.send_message("Discord ID entry field is not configured. Please ping @kanuk", ephemeral=True)
                 return
 
             # Get the user's Discord ID
             user_id = str(interaction.user.id)
 
             # Build the pre-filled URL parameters
-            prefill_params = {
-                self.discord_id_entry: user_id
-            }
+            prefill_params = {self.discord_id_entry: user_id}
 
             # Create the complete URL with pre-filled data
             prefilled_url = f"{self.form_url}?{urlencode(prefill_params)}"
@@ -96,19 +89,22 @@ class ChatCommands(commands.Cog):
             embed = discord.Embed(
                 title="HTG Application Form",
                 description=f"[Click here to apply]({prefilled_url})",
-                color=discord.Color.blue()
+                color=discord.Color.blue(),
             )
 
             # Send the response (ephemeral so only the user sees it)
             await interaction.response.send_message(embed=embed, ephemeral=True)
 
-            logger.info(f"Application form requested by {interaction.user} ({user_id})")
+            logger.info(
+                f"Application form requested by {
+                    interaction.user} ({user_id})"
+            )
 
         except Exception as e:
             logger.error(f"Error in apply command: {e}")
             await interaction.response.send_message(
                 "An error occurred while generating your application link. Please contact an admin.",
-                ephemeral=True
+                ephemeral=True,
             )
 
     # ===== ADMIN EVENT MANAGEMENT COMMANDS =====
@@ -122,7 +118,7 @@ class ChatCommands(commands.Cog):
 
         try:
             # Get the event handler from the bot
-            event_handler = self.bot.get_cog('EventHandler')
+            event_handler = self.bot.get_cog("EventHandler")
             if not event_handler:
                 await interaction.response.send_message("Event system is not loaded.", ephemeral=True)
                 return
@@ -144,7 +140,7 @@ class ChatCommands(commands.Cog):
 
         try:
             # Get the event handler from the bot
-            event_handler = self.bot.get_cog('EventHandler')
+            event_handler = self.bot.get_cog("EventHandler")
             if not event_handler:
                 await interaction.response.send_message("Event system is not loaded.", ephemeral=True)
                 return
@@ -168,7 +164,7 @@ class ChatCommands(commands.Cog):
             await interaction.response.defer()
 
             # Get database from event handler
-            event_handler = self.bot.get_cog('EventHandler')
+            event_handler = self.bot.get_cog("EventHandler")
             if not event_handler:
                 await interaction.followup.send("Event system is not loaded.")
                 return
@@ -176,17 +172,19 @@ class ChatCommands(commands.Cog):
             db = event_handler.db
             stats = db.get_event_stats()
 
-            embed = discord.Embed(
-                title="Event Statistics",
-                color=discord.Color.blue()
-            )
+            embed = discord.Embed(title="Event Statistics", color=discord.Color.blue())
 
-            embed.add_field(name="Total Events Created", value=stats.get('total_events', 0), inline=True)
-            embed.add_field(name="Active Events", value=stats.get('active_events', 0), inline=True)
-            embed.add_field(name="Completed Events", value=stats.get('completed_events', 0), inline=True)
+            embed.add_field(name="Total Events Created", value=stats.get("total_events", 0), inline=True)
+            embed.add_field(name="Active Events", value=stats.get("active_events", 0), inline=True)
+            embed.add_field(name="Completed Events", value=stats.get("completed_events", 0), inline=True)
 
-            if stats.get('avg_participants'):
-                embed.add_field(name="Avg. Participants", value=f"{stats['avg_participants']:.1f}", inline=True)
+            if stats.get("avg_participants"):
+                embed.add_field(
+                    name="Avg. Participants",
+                    value=f"{
+                        stats['avg_participants']:.1f}",
+                    inline=True,
+                )
 
             await interaction.followup.send(embed=embed)
 
@@ -205,7 +203,7 @@ class ChatCommands(commands.Cog):
             await interaction.response.defer()
 
             # Get database from application handler
-            app_handler = self.bot.get_cog('ApplicationHandler')
+            app_handler = self.bot.get_cog("ApplicationHandler")
             if not app_handler:
                 await interaction.followup.send("Application system is not loaded.")
                 return
@@ -213,15 +211,12 @@ class ChatCommands(commands.Cog):
             db = app_handler.db
             stats = db.get_application_stats()
 
-            embed = discord.Embed(
-                title="Application Statistics",
-                color=discord.Color.blue()
-            )
+            embed = discord.Embed(title="Application Statistics", color=discord.Color.blue())
 
-            embed.add_field(name="Total Applications", value=stats.get('total', 0), inline=True)
-            embed.add_field(name="Accepted", value=stats.get('accepted', 0), inline=True)
-            embed.add_field(name="Denied", value=stats.get('denied', 0), inline=True)
-            embed.add_field(name="Pending", value=stats.get('pending', 0), inline=True)
+            embed.add_field(name="Total Applications", value=stats.get("total", 0), inline=True)
+            embed.add_field(name="Accepted", value=stats.get("accepted", 0), inline=True)
+            embed.add_field(name="Denied", value=stats.get("denied", 0), inline=True)
+            embed.add_field(name="Pending", value=stats.get("pending", 0), inline=True)
 
             await interaction.followup.send(embed=embed)
 

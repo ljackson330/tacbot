@@ -10,7 +10,7 @@ class TestPerformance(unittest.TestCase):
     """Performance and load testing"""
 
     def setUp(self):
-        self.temp_db = tempfile.NamedTemporaryFile(delete=False, suffix='.db')
+        self.temp_db = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
         self.temp_db.close()
         self.db = Database(self.temp_db.name)
         self.db.initialize_votes_table()
@@ -33,7 +33,12 @@ class TestPerformance(unittest.TestCase):
         duration = end_time - start_time
 
         # Should complete within reasonable time (adjust threshold as needed)
-        self.assertLess(duration, 10.0, f"Bulk operations took {duration:.2f}s")
+        self.assertLess(
+            duration,
+            10.0,
+            f"Bulk operations took {
+                duration:.2f}s",
+        )
 
     def test_concurrent_database_access(self):
         """Test database performance under concurrent access"""
@@ -78,7 +83,12 @@ class TestPerformance(unittest.TestCase):
         avg_time = sum(valid_times) / len(valid_times)
 
         # Each operation should complete quickly
-        self.assertLess(avg_time, 0.1, f"Average operation time: {avg_time:.3f}s")
+        self.assertLess(
+            avg_time,
+            0.1,
+            f"Average operation time: {
+                avg_time:.3f}s",
+        )
 
         print(f"Concurrent test: {num_threads} threads, {operations_per_thread} ops each")
         print(f"Total time: {end_time - start_time:.2f}s")
