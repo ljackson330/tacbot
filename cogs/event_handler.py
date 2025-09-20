@@ -46,7 +46,7 @@ class EventHandler(commands.Cog):
             self.create_day = int(os.getenv('EVENT_CREATE_DAY', '0'))  # Monday (0=Monday)
             self.create_hour = int(os.getenv('EVENT_CREATE_HOUR', '20'))  # 8 PM
             self.delete_day = int(os.getenv('EVENT_DELETE_DAY', '6'))  # Sunday
-            self.delete_hour = int(os.getenv('EVENT_DELETE_HOUR', '0'))  # Midnight
+            self.delete_hour = int(os.getenv('EVENT_DELETE_HOUR', '23'))  # 11 PM
 
             # Timezone configuration
             timezone_str = os.getenv('TIMEZONE', 'US/Eastern')
