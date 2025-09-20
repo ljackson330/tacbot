@@ -4,35 +4,38 @@ from datetime import datetime
 import os
 import logging
 import asyncio
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Tuple
 from .google_forms_service import GoogleFormsService
 from .database import Database
+import threading
 
 logger = logging.getLogger(__name__)
 
 
 class ApplicationButtons(discord.ui.View):
+    """Persistent view for application voting buttons."""
+
     def __init__(self, cog, response_id: str):
         super().__init__(timeout=None)  # Persistent view
         self.cog = cog
         self.response_id = response_id
 
-    @discord.ui.button(label="Approve", style=discord.ButtonStyle.green)
+    @discord.ui.button(label="Approve", style=discord.ButtonStyle.green, custom_id="approve")
     async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Simulate adding a thumbs up reaction
-        await self.cog._handle_button_vote(interaction, "👍", self.response_id)
+        await self.cog.handle_vote(interaction, "approve", self.response_id)
 
-    @discord.ui.button(label="Deny", style=discord.ButtonStyle.red)
+    @discord.ui.button(label="Deny", style=discord.ButtonStyle.red, custom_id="deny")
     async def deny_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Simulate adding a thumbs down reaction
-        await self.cog._handle_button_vote(interaction, "👎", self.response_id)
+        await self.cog.handle_vote(interaction, "deny", self.response_id)
 
 
 class UndoButton(discord.ui.View):
-    def __init__(self, user_id: int, original_reaction: str, timeout: float = 10.0):
+    """Temporary view for vote cancellation."""
+
+    def __init__(self, user_id: int, vote_type: str, timeout: float = 10.0):
         super().__init__(timeout=timeout)
         self.user_id = user_id
-        self.original_reaction = original_reaction
+        self.vote_type = vote_type
         self.cancelled = False
 
     @discord.ui.button(label="Cancel Vote", style=discord.ButtonStyle.danger)
@@ -44,52 +47,83 @@ class UndoButton(discord.ui.View):
         self.cancelled = True
         self.stop()
 
-        # Delete the message with the button
-        try:
-            await interaction.message.delete()
-        except:
-            pass  # Message might already be deleted
+        await interaction.response.defer()  # Just acknowledge the button press
 
     async def on_timeout(self):
-        # Disable the button after timeout
+        """Clean up after timeout."""
         for item in self.children:
             item.disabled = True
 
 
 class ApplicationHandler(commands.Cog):
+    """Handles Google Forms application processing with Discord voting."""
+
     def __init__(self, bot):
         self.bot = bot
         self.db = Database()
         self.google_service = GoogleFormsService()
 
-        # Configuration
-        self.channel_id = int(os.getenv('APPLICATION_CHANNEL_ID'))
-        self.form_id = os.getenv('GOOGLE_FORM_ID')
-        self.acceptance_threshold = int(os.getenv('ACCEPTANCE_THRESHOLD'))
-        self.denial_threshold = int(os.getenv('DENIAL_THRESHOLD', '1'))  # Default to 1 if not set
-        self.accepted_role_id = int(os.getenv('MEMBER_ROLE'))
-        self.discord_id_entry = os.getenv('DISCORD_ID_ENTRY', 'entry.1141798550')
+        # Thread lock for vote operations
+        self._vote_lock = threading.Lock()
+
+        # Load configuration
+        self._load_config()
+
+        # Initialize database tables
+        self.db.initialize_applications_table()
+        self.db.initialize_votes_table()
 
         # Question mapping - will be built dynamically from form
         self.question_map = {}
 
-        # Track pending undo operations
-        self.pending_undos = {}
-
-        # Track votes per application (response_id -> {user_id: vote_type})
-        self.application_votes = {}
+        # Track processing states to prevent race conditions
+        self._processing_applications = set()
 
         # Start the polling task
         self.check_new_responses.start()
 
-    def cog_unload(self):
-        """Cleanup when cog is unloaded"""
-        self.check_new_responses.cancel()
+    def _load_config(self):
+        """Load configuration from environment variables."""
+        config_map = {
+            "guild_id": ("GUILD_ID", int),
+            "channel_id": ("APPLICATION_CHANNEL_ID", int),
+            "form_id": ("GOOGLE_FORM_ID", str),
+            "acceptance_threshold": ("ACCEPTANCE_THRESHOLD", int),
+            "denial_threshold": ("DENIAL_THRESHOLD", int),
+            "member_role_id": ("MEMBER_ROLE_ID", int),
+            "general_channel_id": ("GENERAL_CHANNEL_ID", int),
+            "discord_id_question": ("DISCORD_ID_QUESTION_ID", str),
+            "poll_interval": ("APPLICATION_POLL_INTERVAL", int),
+        }
 
-    # TODO: tone this the fuck down in prod
-    @tasks.loop(seconds=30)
+        for attr, (env_var, cast) in config_map.items():
+            raw_value = os.getenv(env_var)
+            try:
+                value = cast(raw_value) if raw_value is not None else None
+            except (ValueError, TypeError) as e:
+                logger.error(f"Invalid value for {env_var}: {raw_value!r} ({e})")
+                raise
+            setattr(self, attr, value)
+
+    def cog_unload(self):
+        """Cleanup when cog is unloaded."""
+        self.check_new_responses.cancel()
+        logger.info("ApplicationHandler cog unloaded")
+
+    async def cog_load(self):
+        """Initialize when cog is loaded."""
+        await self._cleanup_stale_data()
+        logger.info("ApplicationHandler cog loaded")
+
+    async def _cleanup_stale_data(self):
+        """Clean up any stale processing states on startup."""
+        self._processing_applications.clear()
+        # Could also clean up old votes or applications here if needed
+        logger.info("Cleaned up stale application data")
+
+    @tasks.loop(seconds=30)  # Default 30 seconds, configurable
     async def check_new_responses(self):
-        """Check for new Google Form responses every 30 seconds"""
+        """Check for new Google Form responses."""
         try:
             # Build question map if not already done
             if not self.question_map:
@@ -110,11 +144,13 @@ class ApplicationHandler(commands.Cog):
 
     @check_new_responses.before_loop
     async def before_check_responses(self):
-        """Wait until bot is ready before starting the loop"""
+        """Wait until bot is ready before starting the loop."""
         await self.bot.wait_until_ready()
+        # Update loop interval if configured
+        self.check_new_responses.change_interval(seconds=self.poll_interval)
 
     async def _build_question_map(self):
-        """Build question map from Google Form metadata"""
+        """Build question map from Google Form metadata."""
         try:
             form_info = await self.google_service.get_form_info(self.form_id)
             self.question_map = self.google_service.build_question_map(form_info)
@@ -125,48 +161,45 @@ class ApplicationHandler(commands.Cog):
             self.question_map = {}
 
     async def _process_new_response(self, response: Dict[str, Any]):
-        """Process a new form response"""
+        """Process a new form response."""
+        response_id = response['responseId']
+
         try:
-            channel = self.bot.get_channel(self.channel_id)
+            guild = self.bot.get_guild(self.guild_id)
+            if not guild:
+                logger.error(f"Could not find guild with ID {self.guild_id}")
+                return
+
+            channel = guild.get_channel(self.channel_id)
             if not channel:
                 logger.error(f"Could not find channel with ID {self.channel_id}")
                 return
 
-            embed = await self._create_application_embed(response)
+            embed = await self._create_application_embed(response, guild)
 
             # Create buttons for voting
-            view = ApplicationButtons(self, response['responseId'])
+            view = ApplicationButtons(self, response_id)
             message = await channel.send(embed=embed, view=view)
 
-            # Initialize vote tracking for this application
-            self.application_votes[response['responseId']] = {}
-
             # Store message info in database
-            self.db.store_application_message(
-                response['responseId'],
-                message.id,
-                channel.id
-            )
+            self.db.store_application_message(response_id, message.id, channel.id)
 
-            logger.info(f"Processed new application: {response['responseId']}")
+            logger.info(f"Processed new application: {response_id}")
 
         except Exception as e:
-            logger.error(f"Error processing response {response['responseId']}: {e}")
+            logger.error(f"Error processing response {response_id}: {e}")
 
-    def _get_discord_id_from_answers(self, answers: Dict[str, Any]) -> tuple:
-        """Extract Discord ID from form answers"""
+    def _extract_discord_id(self, answers: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+        """Extract Discord ID from form answers."""
         try:
-            # First, let's log what question IDs we actually have
-            logger.info(f"Available question IDs: {list(answers.keys())}")
+            logger.debug(f"Available question IDs: {list(answers.keys())}")
 
-            # Try different possible formats for the Discord ID question
+            # Try configured question ID first
             possible_ids = [
-                "440e7696",  # Just the number
-                str(440e7696),  # Ensure it's a string
-                "entry.1141798550",  # Full entry format
+                self.discord_id_question,
+                f"entry.{self.discord_id_question}",
+                str(self.discord_id_question),
             ]
-
-            discord_id = None
 
             # Try each possible ID format
             for question_id in possible_ids:
@@ -174,119 +207,84 @@ class ApplicationHandler(commands.Cog):
                     answer_data = answers[question_id]
                     if 'textAnswers' in answer_data and answer_data['textAnswers']['answers']:
                         discord_id = answer_data['textAnswers']['answers'][0]['value'].strip()
-                        logger.info(f"Found Discord ID using question_id: {question_id}")
-                        found_question_id = question_id
-                        break
+                        if self._validate_discord_id(discord_id):
+                            logger.debug(f"Found Discord ID using question_id: {question_id}")
+                            return discord_id, question_id
 
-            # If direct lookup fails, search through all answers for something that looks like a Discord ID
-            if not discord_id:
-                logger.info("Direct lookup failed, searching all answers for Discord ID pattern")
-                for question_id, answer_data in answers.items():
-                    if 'textAnswers' in answer_data and answer_data['textAnswers']['answers']:
-                        value = answer_data['textAnswers']['answers'][0]['value'].strip()
-                        # Check if this looks like a Discord ID (17-19 digit number)
-                        if value.isdigit() and 17 <= len(value) <= 19:
-                            discord_id = value
-                            logger.info(f"Found Discord ID pattern in question_id: {question_id}, value: {value}")
-                            found_question_id = question_id
-                            break
+            # If direct lookup fails, search through all answers
+            logger.debug("Direct lookup failed, searching all answers for Discord ID pattern")
+            for question_id, answer_data in answers.items():
+                if 'textAnswers' in answer_data and answer_data['textAnswers']['answers']:
+                    value = answer_data['textAnswers']['answers'][0]['value'].strip()
+                    if self._validate_discord_id(value):
+                        logger.debug(f"Found Discord ID pattern in question_id: {question_id}")
+                        return value, question_id
 
-            if discord_id:
-                # Validate it's a proper Discord ID
-                try:
-                    int(discord_id)
-                    return discord_id, found_question_id
-                except ValueError:
-                    logger.warning(f"Invalid Discord ID format: {discord_id}")
-                    return None
-            else:
-                logger.warning("No Discord ID found in any answer")
-                return None
+            logger.warning("No Discord ID found in any answer")
+            return None
 
         except Exception as e:
             logger.error(f"Error extracting Discord ID: {e}")
             return None
 
-    async def _get_discord_user_by_id(self, discord_id: str) -> discord.Member:
-        """Get Discord user by ID from the current guild"""
+    def _validate_discord_id(self, discord_id: str) -> bool:
+        """Validate Discord ID format."""
+        try:
+            # Discord IDs are 17-19 digit numbers
+            return discord_id.isdigit() and 17 <= len(discord_id) <= 19
+        except (AttributeError, TypeError):
+            return False
+
+    async def _get_discord_member(self, discord_id: str, guild: discord.Guild) -> Optional[discord.Member]:
+        """Get Discord member by ID from the specified guild."""
         try:
             discord_id_int = int(discord_id)
-            print(f"Looking for Discord ID: {discord_id_int}")
-
-            guild = self.bot.guilds[0] if self.bot.guilds else None
-            if not guild:
-                print("No guild found")
-                return None
-
-            print(f"Searching in guild: {guild.name}")
+            logger.debug(f"Looking for Discord ID: {discord_id_int} in guild: {guild.name}")
 
             # Try get_member first (cached members only)
             member = guild.get_member(discord_id_int)
             if member:
-                print(f"Found member via get_member: {member.display_name}")
+                logger.debug(f"Found member via get_member: {member.display_name}")
                 return member
 
             # If not in cache, try fetching from Discord API
             try:
                 member = await guild.fetch_member(discord_id_int)
-                print(f"Found member via fetch_member: {member.display_name}")
+                logger.debug(f"Found member via fetch_member: {member.display_name}")
                 return member
             except discord.NotFound:
-                print(f"Member {discord_id_int} not found in guild")
+                logger.warning(f"Member {discord_id_int} not found in guild {guild.name}")
                 return None
             except discord.HTTPException as e:
-                print(f"HTTP error fetching member: {e}")
+                logger.error(f"HTTP error fetching member {discord_id_int}: {e}")
                 return None
 
         except ValueError:
-            print(f"Invalid Discord ID format: {discord_id}")
+            logger.error(f"Invalid Discord ID format: {discord_id}")
             return None
         except Exception as e:
-            print(f"Error getting user by ID {discord_id}: {e}")
+            logger.error(f"Unexpected error getting member {discord_id}: {e}")
             return None
 
-    def _update_embed_with_vote_counts(self, embed: discord.Embed, response_id: str) -> discord.Embed:
-        """Update embed with current vote counts"""
-        if response_id not in self.application_votes:
-            return embed
-
-        votes = self.application_votes[response_id]
-        thumbs_up = sum(1 for vote in votes.values() if vote == '👍')
-        thumbs_down = sum(1 for vote in votes.values() if vote == '👎')
-
-        # Get voter names for display
-        approvers = [f"<@{uid}>" for uid, vote in votes.items() if vote == '👍']
-        deniers = [f"<@{uid}>" for uid, vote in votes.items() if vote == '👎']
-
-        # Add or update vote count field
-        vote_info = f"**Approvals ({thumbs_up}):** {', '.join(approvers) if approvers else 'None'}\n"
-        vote_info += f"**Denials ({thumbs_down}):** {', '.join(deniers) if deniers else 'None'}"
-
-        # Remove existing vote field if it exists
-        for i, field in enumerate(embed.fields):
-            if field.name == "Votes":
-                embed.remove_field(i)
-                break
-
-        # Add vote field at the end
-        embed.add_field(name="Votes", value=vote_info, inline=False)
-
-        return embed
-
-    async def _create_application_embed(self, response: Dict[str, Any]) -> discord.Embed:
+    async def _create_application_embed(self, response: Dict[str, Any], guild: discord.Guild) -> discord.Embed:
+        """Create embed for application display."""
         # Parse timestamp
         iso_timestamp = response['createTime']
         dt = datetime.fromisoformat(iso_timestamp.replace("Z", "+00:00"))
         unix_ts = int(dt.timestamp())
 
         answers = response.get('answers', {})
-        discord_id, discord_question_id = self._get_discord_id_from_answers(answers)
+        discord_data = self._extract_discord_id(answers)
 
-        # Try to get the Discord user object (now awaited)
+        discord_id = None
+        discord_question_id = None
+        if discord_data:
+            discord_id, discord_question_id = discord_data
+
+        # Try to get the Discord member
         member = None
         if discord_id:
-            member = await self._get_discord_user_by_id(discord_id)  # Use a simpler function
-            print(member)
+            member = await self._get_discord_member(discord_id, guild)
 
         # Build the embed
         if member:
@@ -294,6 +292,8 @@ class ApplicationHandler(commands.Cog):
             thumbnail_url = member.display_avatar.url if hasattr(member, 'display_avatar') else None
         else:
             title = "Application from Unknown User"
+            if discord_id:
+                title += f" (ID: {discord_id})"
             thumbnail_url = None
 
         embed = discord.Embed(
@@ -302,332 +302,368 @@ class ApplicationHandler(commands.Cog):
             color=discord.Color.blue()
         )
 
-        # Set thumbnail if we have a profile picture
+        # Set thumbnail if available
         if thumbnail_url:
             embed.set_thumbnail(url=thumbnail_url)
 
-        # Add form answers as fields
+        # Add form answers as fields (sanitize input)
         for question_id, question_title in self.question_map.items():
-            # Skip the Discord ID since we display it in the description
+            # Skip the Discord ID since we display it in the title/description
             if question_id == discord_question_id:
                 continue
 
             if question_id in answers:
-                question_title = self.question_map.get(question_id, f"Question {question_id}")
                 answer_data = answers[question_id]
 
-                # Handle different answer types
+                # Handle different answer types and sanitize
                 if 'textAnswers' in answer_data:
-                    answer_text = ", ".join(a['value'] for a in answer_data['textAnswers']['answers'])
+                    raw_answers = [a['value'] for a in answer_data['textAnswers']['answers']]
+                    answer_text = ", ".join(self._sanitize_text(ans) for ans in raw_answers)
                 else:
-                    answer_text = str(answer_data)
+                    answer_text = self._sanitize_text(str(answer_data))
+
+                # Let Discord handle embed length limits naturally
 
                 embed.add_field(
-                    name=question_title,
+                    name=self._sanitize_text(question_title),
                     value=answer_text or "*No answer provided*",
                     inline=False
                 )
 
-        # Add initial empty vote field
-        embed.add_field(name="Votes", value="**Approvals (0):** None\n**Denials (0):** None", inline=False)
+        # Add initial vote status
+        embed.add_field(
+            name="Votes",
+            value="**Approvals (0):** None\n**Denials (0):** None",
+            inline=False
+        )
 
         return embed
 
-    async def _handle_button_vote(self, interaction: discord.Interaction, vote_type: str, response_id: str):
-        """Handle button-based voting on applications"""
+    def _sanitize_text(self, text: str) -> str:
+        """Sanitize text for embed display."""
+        if not isinstance(text, str):
+            text = str(text)
+
+        # Remove or escape potential markdown/mentions
+        text = text.replace('@', '@\u200b')  # Zero-width space to break mentions
+        text = text.replace('`', '`\u200b')  # Break code blocks
+
+        return text.strip()
+
+    async def handle_vote(self, interaction: discord.Interaction, vote_type: str, response_id: str):
+        """Handle voting on applications with proper locking."""
+        user_id = interaction.user.id
+
+        # Check if application is being processed
+        if response_id in self._processing_applications:
+            await interaction.response.send_message(
+                "This application is currently being processed. Please wait.",
+                ephemeral=True
+            )
+            return
+
         try:
-            user = interaction.user
+            with self._vote_lock:
+                # Get current vote status
+                current_vote = self.db.get_user_vote(response_id, user_id)
 
-            # Check if user already voted
-            if response_id in self.application_votes:
-                if user.id in self.application_votes[response_id]:
-                    # User already voted - remove their previous vote or update it
-                    previous_vote = self.application_votes[response_id][user.id]
-                    if previous_vote == vote_type:
-                        # Same vote - remove it (toggle off)
-                        del self.application_votes[response_id][user.id]
-
-                        # Update the embed and respond
-                        embed = interaction.message.embeds[0]
-                        updated_embed = self._update_embed_with_vote_counts(embed, response_id)
-                        await interaction.response.edit_message(embed=updated_embed)
-
-                        # Recheck vote counts after removal
-                        await self._recheck_button_vote_counts(interaction.message, response_id)
-                        return
-                    else:
-                        # Different vote - update it
-                        self.application_votes[response_id][user.id] = vote_type
-
-                        # Update the embed and respond
-                        embed = interaction.message.embeds[0]
-                        updated_embed = self._update_embed_with_vote_counts(embed, response_id)
-                        await interaction.response.edit_message(embed=updated_embed)
-                        await interaction.followup.send(f"Changed your vote to {vote_type}.", ephemeral=True)
+                if current_vote == vote_type:
+                    # Same vote - remove it (toggle off)
+                    self.db.remove_vote(response_id, user_id)
+                    await interaction.response.defer()
+                elif current_vote:
+                    # Different vote - update it
+                    self.db.update_vote(response_id, user_id, vote_type)
+                    await interaction.response.defer()
                 else:
                     # New vote
-                    self.application_votes[response_id][user.id] = vote_type
+                    self.db.add_vote(response_id, user_id, vote_type)
+                    await interaction.response.defer()
 
-                    # Update the embed and respond
-                    embed = interaction.message.embeds[0]
-                    updated_embed = self._update_embed_with_vote_counts(embed, response_id)
-                    await interaction.response.edit_message(embed=updated_embed)
+            # Update embed with new vote counts
+            await self._update_application_embed(interaction.message, response_id)
+
+            # Check if this vote is decisive
+            vote_counts = self.db.get_vote_counts(response_id)
+
+            if self._is_decisive_vote(vote_counts, vote_type):
+                await self._handle_decisive_vote(interaction, response_id, vote_type, vote_counts)
             else:
-                # Initialize vote tracking for this response
-                self.application_votes[response_id] = {user.id: vote_type}
-
-                # Update the embed and respond
-                embed = interaction.message.embeds[0]
-                updated_embed = self._update_embed_with_vote_counts(embed, response_id)
-                await interaction.response.edit_message(embed=updated_embed)
-
-            # Count current votes
-            thumbs_up = sum(1 for vote in self.application_votes[response_id].values() if vote == '👍')
-            thumbs_down = sum(1 for vote in self.application_votes[response_id].values() if vote == '👎')
-
-            logger.info(f"Application {response_id}: {thumbs_up} 👍, {thumbs_down} 👎")
-
-            # Check if this vote is decisive (reaches threshold)
-            is_decisive = False
-            if thumbs_up >= self.acceptance_threshold and vote_type == '👍':
-                is_decisive = True
-                decision_type = "accept"
-            elif thumbs_down >= self.denial_threshold and vote_type == '👎':
-                is_decisive = True
-                decision_type = "deny"
-
-            # If this is a decisive vote, offer undo option
-            if is_decisive:
-                await self._offer_vote_undo(interaction.message, user, vote_type, response_id, decision_type)
-
-            # Only process application if this isn't a decisive vote (which needs undo window)
-            # If it's a decisive vote, the processing will happen after the undo timeout
-            if not is_decisive:
-                # Check if acceptance threshold is met
-                if thumbs_up >= self.acceptance_threshold:
-                    await self._accept_application(interaction.message, response_id)
-                elif thumbs_down >= self.denial_threshold:
-                    await self._deny_application(interaction.message, response_id)
+                # Check if threshold reached without being decisive
+                await self._check_auto_process(interaction.message, response_id, vote_counts)
 
         except Exception as e:
-            logger.error(f"Error handling button vote for application {response_id}: {e}")
-            try:
-                if not interaction.response.is_done():
-                    await interaction.response.send_message("An error occurred while processing your vote.",
-                                                            ephemeral=True)
-                else:
-                    await interaction.followup.send("An error occurred while processing your vote.", ephemeral=True)
-            except:
-                pass
+            logger.error(f"Error handling vote for application {response_id}: {e}")
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "An error occurred while processing your vote.",
+                    ephemeral=True
+                )
 
-    async def _offer_vote_undo(self, message: discord.Message, user: discord.User, reaction_emoji: str,
-                               response_id: str, decision_type: str):
-        """Offer the user a chance to undo their decisive vote"""
+    def _is_decisive_vote(self, vote_counts: Dict[str, int], vote_type: str) -> bool:
+        """Check if this vote reaches the threshold and is the deciding vote."""
+        approvals = vote_counts.get('approve', 0)
+        denials = vote_counts.get('deny', 0)
+
+        if vote_type == 'approve' and approvals >= self.acceptance_threshold:
+            # Check if this was the decisive vote (one less before this vote)
+            return (approvals - 1) < self.acceptance_threshold
+        elif vote_type == 'deny' and denials >= self.denial_threshold:
+            # Check if this was the decisive vote
+            return (denials - 1) < self.denial_threshold
+
+        return False
+
+    async def _handle_decisive_vote(self, interaction: discord.Interaction, response_id: str,
+                                    vote_type: str, vote_counts: Dict[str, int]):
+        """Handle a decisive vote with undo option."""
+        decision = "accept" if vote_type == 'approve' else "deny"
+
+        # Create undo button
+        view = UndoButton(interaction.user.id, vote_type)
+
         try:
-            # Create undo button view
-            view = UndoButton(user.id, reaction_emoji)
-
-            # Send message in channel with undo button (only the specific user can use it)
-            undo_msg = await message.channel.send(
-                f"{user.mention}, your vote was decisive and will **{decision_type}** this application. You have 10 seconds to cancel your vote if this was a mistake.",
-                view=view,
-                delete_after=15  # Delete message after timeout + buffer
+            undo_msg = await interaction.followup.send(
+                f"{interaction.user.mention}, your vote was decisive and will **{decision}** this application. "
+                f"You have 10 seconds to cancel if this was a mistake.",
+                view=view
             )
-
-            # Track this pending undo
-            self.pending_undos[response_id] = {
-                'user_id': user.id,
-                'reaction': reaction_emoji,
-                'message': message,
-                'decision_type': decision_type
-            }
 
             # Wait for either button click or timeout
             await view.wait()
 
-            # Clean up pending undo
-            if response_id in self.pending_undos:
-                del self.pending_undos[response_id]
+            # Delete the undo message after completion (success or timeout)
+            try:
+                await undo_msg.delete()
+            except discord.NotFound:
+                pass  # Message already deleted
+            except discord.HTTPException:
+                pass  # Failed to delete, but continue
 
             if view.cancelled:
-                # User cancelled their vote - remove their vote from tracking
-                try:
-                    if response_id in self.application_votes and user.id in self.application_votes[response_id]:
-                        del self.application_votes[response_id][user.id]
-                        logger.info(
-                            f"Removed {reaction_emoji} vote from {user.display_name} on application {response_id}")
+                # User cancelled - remove their vote
+                with self._vote_lock:
+                    self.db.remove_vote(response_id, interaction.user.id)
 
-                    # Update the embed with new vote counts
-                    embed = message.embeds[0]
-                    updated_embed = self._update_embed_with_vote_counts(embed, response_id)
-                    await message.edit(embed=updated_embed)
+                await self._update_application_embed(interaction.message, response_id)
 
-                    # Recheck vote counts after removal
-                    await asyncio.sleep(0.5)  # Small delay
-                    await self._recheck_button_vote_counts(message, response_id)
+                # Recheck thresholds after cancellation
+                new_counts = self.db.get_vote_counts(response_id)
+                await self._check_auto_process(interaction.message, response_id, new_counts)
 
-                except Exception as e:
-                    logger.error(f"Error removing vote: {e}")
             else:
-                # Timeout occurred - proceed with original decision
-                logger.info(f"Vote undo timeout for application {response_id}, proceeding with {decision_type}")
-                if decision_type == "accept":
-                    await self._accept_application(message, response_id)
-                else:
-                    await self._deny_application(message, response_id)
+                # Timeout - proceed with decision
+                await self._process_application(interaction.message, response_id, decision)
 
         except Exception as e:
-            logger.error(f"Error in vote undo process: {e}")
-            # Clean up pending undo on error
-            if response_id in self.pending_undos:
-                del self.pending_undos[response_id]
+            logger.error(f"Error in decisive vote handling: {e}")
 
-    async def _recheck_button_vote_counts(self, message: discord.Message, response_id: str):
-        """Recheck vote counts after a vote is removed"""
+    async def _check_auto_process(self, message: discord.Message, response_id: str,
+                                  vote_counts: Dict[str, int]):
+        """Check if application should be auto-processed based on vote counts."""
+        approvals = vote_counts.get('approve', 0)
+        denials = vote_counts.get('deny', 0)
+
+        if approvals >= self.acceptance_threshold:
+            await self._process_application(message, response_id, "accept")
+        elif denials >= self.denial_threshold:
+            await self._process_application(message, response_id, "deny")
+
+    async def _update_application_embed(self, message: discord.Message, response_id: str):
+        """Update application embed with current vote counts."""
         try:
-            # Count current votes
-            if response_id not in self.application_votes:
+            # Get vote data from database
+            votes = self.db.get_votes(response_id)
+            vote_counts = self.db.get_vote_counts(response_id)
+
+            embed = message.embeds[0]
+
+            # Build vote display
+            approvers = [f"<@{vote['user_id']}>" for vote in votes if vote['vote_type'] == 'approve']
+            deniers = [f"<@{vote['user_id']}>" for vote in votes if vote['vote_type'] == 'deny']
+
+            approvals_count = vote_counts.get('approve', 0)
+            denials_count = vote_counts.get('deny', 0)
+
+            vote_info = f"**Approvals ({approvals_count}):** {', '.join(approvers) if approvers else 'None'}\n"
+            vote_info += f"**Denials ({denials_count}):** {', '.join(deniers) if deniers else 'None'}"
+
+            # Update or add vote field
+            for i, field in enumerate(embed.fields):
+                if field.name == "Votes":
+                    embed.set_field_at(i, name="Votes", value=vote_info, inline=False)
+                    break
+            else:
+                # Vote field not found, add it
+                embed.add_field(name="Votes", value=vote_info, inline=False)
+
+            await message.edit(embed=embed)
+
+        except Exception as e:
+            logger.error(f"Error updating embed for {response_id}: {e}")
+
+    async def _process_application(self, message: discord.Message, response_id: str, decision: str):
+        """Process application acceptance or denial."""
+        if response_id in self._processing_applications:
+            return  # Already being processed
+
+        self._processing_applications.add(response_id)
+
+        try:
+            # Check if already processed
+            app_data = self.db.get_application_by_message_id(message.id)
+            if app_data and app_data.get('status') in ['accepted', 'denied']:
                 return
 
-            thumbs_up = sum(1 for vote in self.application_votes[response_id].values() if vote == '👍')
-            thumbs_down = sum(1 for vote in self.application_votes[response_id].values() if vote == '👎')
+            guild = self.bot.get_guild(self.guild_id)
+            if not guild:
+                logger.error(f"Could not find guild {self.guild_id}")
+                return
 
-            logger.info(f"Rechecked application {response_id}: {thumbs_up} 👍, {thumbs_down} 👎")
+            # Update embed
+            embed = message.embeds[0]
+            now = datetime.now()
+            unix_ts = int(now.timestamp())
 
-            # Check if threshold is still met
-            if thumbs_up >= self.acceptance_threshold:
-                await self._accept_application(message, response_id)
-            elif thumbs_down >= self.denial_threshold:
-                await self._deny_application(message, response_id)
+            if decision == "accept":
+                embed.description += f"\n**✅ Accepted:** <t:{unix_ts}:f>"
+                embed.colour = discord.Color.green()
+                await self._handle_acceptance(guild, response_id)
+            else:
+                embed.description += f"\n**❌ Denied:** <t:{unix_ts}:f>"
+                embed.colour = discord.Color.red()
+                await self._handle_denial(guild, response_id)
+
+            # Remove all buttons by passing None as the view
+            await message.edit(embed=embed, view=None)
+
+            # Mark as processed in database
+            self.db.set_application_status(response_id, decision)
+
+            logger.info(f"Application {response_id} {decision}ed")
 
         except Exception as e:
-            logger.error(f"Error rechecking vote counts: {e}")
+            logger.error(f"Error processing application {response_id}: {e}")
+        finally:
+            self._processing_applications.discard(response_id)
 
-    async def _get_member_and_role(self, response_id: str, guild: discord.Guild):
-        """Get the Discord member and role for application processing"""
-        responses = await self.google_service.get_form_responses(self.form_id)
-        target_response = next((r for r in responses if r['responseId'] == response_id), None)
+    async def _handle_acceptance(self, guild: discord.Guild, response_id: str):
+        """Handle application acceptance."""
+        member, role = await self._get_member_and_role(guild, response_id)
 
-        if not target_response:
-            logger.error(f"Could not find response with ID {response_id}")
-            return None, None
-
-        answers = target_response.get('answers', {})
-        discord_id, _ = self._get_discord_id_from_answers(answers)
-
-        if not discord_id:
-            logger.warning(f"Could not extract Discord ID from response {response_id}")
-            return None, None
-
-        member = await self._get_discord_user_by_id(discord_id)
         if not member:
-            logger.warning(f"Could not find member with Discord ID {discord_id}")
-            return None, None
+            logger.warning(f"Could not find member for accepted application {response_id}")
+            return
 
-        role = guild.get_role(self.accepted_role_id)
-        if not role:
-            logger.error(f"Could not find role with ID {self.accepted_role_id}")
-            return member, None
-
-        return member, role
-
-    async def _notify_user(self, member: discord.Member, accepted: bool, guild_name: str):
-        """Send DM notification to user about application result"""
-        try:
-            status = "accepted" if accepted else "denied"
-            if accepted:
-                message = f"Your application to {guild_name} has been **accepted**! You now have access to the server."
-            else:
-                message = f"Your application to {guild_name} has been **denied**."
-
-            await member.send(message)
-            logger.info(f"Successfully notified {member.display_name} about {status}")
-        except discord.Forbidden:
-            logger.warning(f"Could not DM {member.display_name} about application result")
-
-    async def _accept_application(self, message: discord.Message, response_id: str):
-        """Accept an application"""
-        # Check if this application is already processed
-        app_data = self.db.get_application_by_message_id(message.id)
-        if app_data and app_data.get('status') in ['accepted', 'denied']:
-            return  # Already processed
-
-        # Update embed
-        embed = message.embeds[0]
-        now = datetime.now()
-        unix_ts = int(now.timestamp())
-        embed.description += f"\n**Approved:** <t:{unix_ts}:f>"
-        embed.remove_footer()
-        embed.colour = discord.Color.green()
-
-        # Disable all buttons
-        view = discord.ui.View()
-        for item in view.children:
-            item.disabled = True
-
-        await message.edit(embed=embed, view=view)
-
-        # Mark as processed in database
-        self.db.set_application_status(response_id, 'accepted')
-
-        # Clean up vote tracking
-        if response_id in self.application_votes:
-            del self.application_votes[response_id]
-
-        # Get member and role
-        member, role = await self._get_member_and_role(response_id, message.guild)
-
-        if member and role:
+        if role:
             try:
                 await member.add_roles(role, reason=f"Application {response_id} accepted")
                 logger.info(f"Added role {role.name} to {member.display_name}")
-                await self._notify_user(member, True, message.guild.name)
-            except Exception as e:
-                logger.error(f"Error adding role to {member.display_name}: {e}")
+            except discord.HTTPException as e:
+                logger.error(f"Failed to add role to {member.display_name}: {e}")
 
-        logger.info(f"Application {response_id} accepted")
+        # Send notifications
+        await self._send_notifications(member, True, guild.name)
 
-    async def _deny_application(self, message: discord.Message, response_id: str):
-        """Deny an application"""
-        # Check if this application is already processed
-        app_data = self.db.get_application_by_message_id(message.id)
-        if app_data and app_data.get('status') in ['accepted', 'denied']:
-            return  # Already processed
-
-        # Update embed
-        embed = message.embeds[0]
-        now = datetime.now()
-        unix_ts = int(now.timestamp())
-        embed.description += f"\n**Denied:** <t:{unix_ts}:f>"
-        embed.remove_footer()
-        embed.colour = discord.Color.red()
-
-        # Disable all buttons
-        view = discord.ui.View()
-        for item in view.children:
-            item.disabled = True
-
-        await message.edit(embed=embed, view=view)
-
-        # Mark as processed in database
-        self.db.set_application_status(response_id, 'denied')
-
-        # Clean up vote tracking
-        if response_id in self.application_votes:
-            del self.application_votes[response_id]
-
-        # Get member and kick them
-        member, _ = await self._get_member_and_role(response_id, message.guild)
+    async def _handle_denial(self, guild: discord.Guild, response_id: str):
+        """Handle application denial."""
+        member, _ = await self._get_member_and_role(guild, response_id)
 
         if member:
             try:
                 await member.kick(reason=f"Application {response_id} denied")
-                logger.info(f"Kicked {member.display_name} from the server")
-            except Exception as e:
-                logger.error(f"Error kicking {member.display_name}: {e}")
+                logger.info(f"Kicked {member.display_name} from server")
+            except discord.HTTPException as e:
+                logger.error(f"Failed to kick {member.display_name}: {e}")
 
-        logger.info(f"Application {response_id} denied")
+    async def _get_member_and_role(self, guild: discord.Guild, response_id: str) -> Tuple[
+        Optional[discord.Member], Optional[discord.Role]]:
+        """Get the Discord member and role for application processing."""
+        try:
+            responses = await self.google_service.get_form_responses(self.form_id)
+            target_response = next((r for r in responses if r['responseId'] == response_id), None)
+
+            if not target_response:
+                logger.error(f"Could not find response with ID {response_id}")
+                return None, None
+
+            answers = target_response.get('answers', {})
+            discord_data = self._extract_discord_id(answers)
+
+            if not discord_data:
+                logger.warning(f"Could not extract Discord ID from response {response_id}")
+                return None, None
+
+            discord_id, _ = discord_data
+            member = await self._get_discord_member(discord_id, guild)
+
+            if not member:
+                logger.warning(f"Could not find member with Discord ID {discord_id}")
+                return None, None
+
+            role = guild.get_role(self.member_role_id)
+            if not role:
+                logger.error(f"Could not find role with ID {self.member_role_id}")
+                return member, None
+
+            return member, role
+
+        except Exception as e:
+            logger.error(f"Error getting member and role for {response_id}: {e}")
+            return None, None
+
+    async def _send_notifications(self, member: discord.Member, accepted: bool, guild_name: str):
+        """Send notifications for application result."""
+        guild = self.bot.get_guild(self.guild_id)
+        if not guild:
+            return
+
+        # Try to DM the user
+        if accepted:
+            try:
+                message = f"Your application to **{guild_name}** has been **accepted**! You now have access to the server."
+                await member.send(message)
+                logger.info(f"Successfully notified {member.display_name} of acceptance")
+            except discord.Forbidden:
+                logger.warning(f"Could not DM {member.display_name} about acceptance")
+
+            # Post welcome message in general
+            general_channel = guild.get_channel(self.general_channel_id)
+            if general_channel:
+                try:
+                    welcome_message = (
+                        f"Welcome to {guild_name}, {member.mention}! "
+                        f"Please reach out to an admin if you have any questions."
+                    )
+                    await general_channel.send(welcome_message)
+                    logger.info(f"Sent welcome message for {member.display_name}")
+                except discord.HTTPException as e:
+                    logger.error(f"Failed to send welcome message: {e}")
+
+    @commands.command(name="app_stats")
+    @commands.has_permissions(administrator=True)
+    async def application_stats(self, ctx):
+        """Show application statistics (admin only)."""
+        try:
+            stats = self.db.get_application_stats()
+
+            embed = discord.Embed(
+                title="Application Statistics",
+                color=discord.Color.blue()
+            )
+
+            embed.add_field(name="Total Applications", value=stats.get('total', 0), inline=True)
+            embed.add_field(name="Accepted", value=stats.get('accepted', 0), inline=True)
+            embed.add_field(name="Denied", value=stats.get('denied', 0), inline=True)
+            embed.add_field(name="Pending", value=stats.get('pending', 0), inline=True)
+
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            logger.error(f"Error getting application stats: {e}")
+            await ctx.send("Error retrieving application statistics.")
 
 
 async def setup(bot):
+    """Setup function for the cog."""
     await bot.add_cog(ApplicationHandler(bot))

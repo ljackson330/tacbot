@@ -179,28 +179,6 @@ class Database:
         except Exception as e:
             logger.error(f"Error recording vote: {e}")
 
-    def get_application_stats(self) -> Dict[str, int]:
-        """Get statistics about applications"""
-        try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-
-            cursor.execute('''
-                SELECT status, COUNT(*) as count 
-                FROM applications 
-                GROUP BY status
-            ''')
-
-            stats = {}
-            for row in cursor.fetchall():
-                stats[row['status']] = row['count']
-
-            return stats
-
-        except Exception as e:
-            logger.error(f"Error getting application stats: {e}")
-            return {}
-
     def cleanup_old_data(self, days: int = 30):
         """Clean up old processed responses (optional maintenance)"""
         try:
@@ -218,6 +196,167 @@ class Database:
         except Exception as e:
             logger.error(f"Error cleaning up old data: {e}")
 
+    # ===== NEW METHODS FOR IMPROVED APPLICATION HANDLER =====
+
+    def initialize_applications_table(self):
+        """Initialize the applications table (already exists above, but ensuring consistency)"""
+        # This is already handled in _initialize_database, but keeping for API consistency
+        pass
+
+    def initialize_votes_table(self):
+        """Initialize the votes table for application voting."""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS votes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    response_id TEXT NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    vote_type TEXT NOT NULL CHECK (vote_type IN ('approve', 'deny')),
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(response_id, user_id)
+                )
+            """)
+            conn.commit()
+            logger.info("Votes table initialized")
+        except Exception as e:
+            logger.error(f"Error initializing votes table: {e}")
+            raise
+
+    def add_vote(self, response_id: str, user_id: int, vote_type: str):
+        """Add a new vote for an application."""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO votes (response_id, user_id, vote_type)
+                VALUES (?, ?, ?)
+            """, (response_id, user_id, vote_type))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Error adding vote: {e}")
+            raise
+
+    def update_vote(self, response_id: str, user_id: int, vote_type: str):
+        """Update an existing vote."""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                UPDATE votes 
+                SET vote_type = ?, created_at = CURRENT_TIMESTAMP
+                WHERE response_id = ? AND user_id = ?
+            """, (vote_type, response_id, user_id))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Error updating vote: {e}")
+            raise
+
+    def remove_vote(self, response_id: str, user_id: int):
+        """Remove a vote from an application."""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                DELETE FROM votes 
+                WHERE response_id = ? AND user_id = ?
+            """, (response_id, user_id))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Error removing vote: {e}")
+            raise
+
+    def get_user_vote(self, response_id: str, user_id: int) -> Optional[str]:
+        """Get a user's current vote for an application."""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT vote_type FROM votes 
+                WHERE response_id = ? AND user_id = ?
+            """, (response_id, user_id))
+            result = cursor.fetchone()
+            return result[0] if result else None
+        except Exception as e:
+            logger.error(f"Error getting user vote: {e}")
+            return None
+
+    def get_votes(self, response_id: str) -> list:
+        """Get all votes for an application."""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT user_id, vote_type, created_at FROM votes 
+                WHERE response_id = ?
+                ORDER BY created_at DESC
+            """, (response_id,))
+            return [{'user_id': row[0], 'vote_type': row[1], 'created_at': row[2]}
+                    for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Error getting votes: {e}")
+            return []
+
+    def get_vote_counts(self, response_id: str) -> dict:
+        """Get vote counts for an application."""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT vote_type, COUNT(*) FROM votes 
+                WHERE response_id = ?
+                GROUP BY vote_type
+            """, (response_id,))
+            return {row[0]: row[1] for row in cursor.fetchall()}
+        except Exception as e:
+            logger.error(f"Error getting vote counts: {e}")
+            return {}
+
+    def get_application_stats(self) -> dict:
+        """Get application statistics."""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            stats = {}
+
+            # Total applications
+            cursor.execute("SELECT COUNT(*) FROM applications")
+            stats['total'] = cursor.fetchone()[0]
+
+            # Status breakdown - handle both 'accepted'/'denied' and 'accept'/'deny'
+            cursor.execute("""
+                SELECT 
+                    CASE 
+                        WHEN status = 'accept' THEN 'accepted'
+                        WHEN status = 'deny' THEN 'denied'
+                        ELSE status 
+                    END as normalized_status, 
+                    COUNT(*) 
+                FROM applications 
+                WHERE status IS NOT NULL AND status != 'pending'
+                GROUP BY normalized_status
+            """)
+            for status, count in cursor.fetchall():
+                stats[status] = count
+
+            # Ensure accepted and denied exist even if 0
+            if 'accepted' not in stats:
+                stats['accepted'] = 0
+            if 'denied' not in stats:
+                stats['denied'] = 0
+
+            # Pending (no status or status = 'pending')
+            cursor.execute("SELECT COUNT(*) FROM applications WHERE status IS NULL OR status = 'pending'")
+            stats['pending'] = cursor.fetchone()[0]
+
+            return stats
+        except Exception as e:
+            logger.error(f"Error getting application stats: {e}")
+            return {}
+
+    # ===== EXISTING EVENT METHODS (keeping them as they are) =====
+
     def initialize_events_table(self):
         """Initialize the events table"""
         try:
@@ -229,9 +368,9 @@ class Database:
                     event_id INTEGER PRIMARY KEY,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     event_date DATE,
-                    interested_count INTEGER DEFAULT 0,
-                    interested_users TEXT DEFAULT '',
-                    status TEXT DEFAULT 'active'
+                    participant_count INTEGER DEFAULT 0,
+                    participant_names TEXT DEFAULT '',
+                    deleted INTEGER DEFAULT 0
                 )
             ''')
 
@@ -245,7 +384,7 @@ class Database:
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM events WHERE status = 'active'")
+            cursor.execute("SELECT COUNT(*) FROM events WHERE deleted = 0")
             return cursor.fetchone()[0] > 0
         except Exception as e:
             logger.error(f"Error checking active event: {e}")
@@ -257,8 +396,8 @@ class Database:
             conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT INTO events (event_id, event_date, status)
-                VALUES (?, ?, 'active')
+                INSERT INTO events (event_id, event_date, deleted)
+                VALUES (?, ?, 0)
             ''', (event_id, event_date))
             conn.commit()
         except Exception as e:
@@ -270,13 +409,28 @@ class Database:
             conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT * FROM events WHERE status = 'active' ORDER BY created_at DESC LIMIT 1"
+                "SELECT * FROM events WHERE deleted = 0 ORDER BY created_at DESC LIMIT 1"
             )
             row = cursor.fetchone()
             return dict(row) if row else None
         except Exception as e:
             logger.error(f"Error getting active event: {e}")
             return None
+
+    def get_all_active_events(self) -> list:
+        """Get all active events from the database."""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT event_id, event_date FROM events 
+                WHERE deleted = 0
+            """)
+            return [{'event_id': row[0], 'event_date': row[1]}
+                    for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Error getting active events: {e}")
+            return []
 
     def update_event_participants(self, event_id: int, count: int, users: list):
         """Update event participants"""
@@ -286,7 +440,7 @@ class Database:
             users_str = ','.join(users) if users else ''
             cursor.execute('''
                 UPDATE events 
-                SET interested_count = ?, interested_users = ?
+                SET participant_count = ?, participant_names = ?
                 WHERE event_id = ?
             ''', (count, users_str, event_id))
             conn.commit()
@@ -299,11 +453,44 @@ class Database:
             conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute('''
-                UPDATE events SET status = 'deleted' WHERE event_id = ?
+                UPDATE events SET deleted = 1 WHERE event_id = ?
             ''', (event_id,))
             conn.commit()
         except Exception as e:
             logger.error(f"Error marking event deleted: {e}")
+
+    def get_event_stats(self) -> dict:
+        """Get event statistics."""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            stats = {}
+
+            # Total events created
+            cursor.execute("SELECT COUNT(*) FROM events")
+            stats['total_events'] = cursor.fetchone()[0]
+
+            # Active events
+            cursor.execute("SELECT COUNT(*) FROM events WHERE deleted = 0")
+            stats['active_events'] = cursor.fetchone()[0]
+
+            # Completed events
+            cursor.execute("SELECT COUNT(*) FROM events WHERE deleted = 1")
+            stats['completed_events'] = cursor.fetchone()[0]
+
+            # Average participants for completed events
+            cursor.execute("""
+                SELECT AVG(participant_count) FROM events 
+                WHERE deleted = 1 AND participant_count IS NOT NULL
+            """)
+            result = cursor.fetchone()[0]
+            if result:
+                stats['avg_participants'] = float(result)
+
+            return stats
+        except Exception as e:
+            logger.error(f"Error getting event stats: {e}")
+            return {}
 
     def close(self):
         """Close database connection"""
