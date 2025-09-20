@@ -3,11 +3,42 @@ from discord.ext import commands, tasks
 from datetime import datetime
 import os
 import logging
+import asyncio
 from typing import Dict, Any
 from .google_forms_service import GoogleFormsService
 from .database import Database
 
 logger = logging.getLogger(__name__)
+
+
+class UndoButton(discord.ui.View):
+    def __init__(self, user_id: int, original_reaction: str, timeout: float = 10.0):
+        super().__init__(timeout=timeout)
+        self.user_id = user_id
+        self.original_reaction = original_reaction
+        self.cancelled = False
+
+    @discord.ui.button(label="Cancel Vote", style=discord.ButtonStyle.danger)
+    async def cancel_vote(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This button is not for you!", ephemeral=True)
+            return
+
+        self.cancelled = True
+        self.stop()
+
+        # Delete the message with the button
+        try:
+            await interaction.message.delete()
+        except:
+            pass  # Message might already be deleted
+
+        await interaction.response.send_message("Vote cancelled! Your reaction has been removed.", ephemeral=True)
+
+    async def on_timeout(self):
+        # Disable the button after timeout
+        for item in self.children:
+            item.disabled = True
 
 
 class ApplicationHandler(commands.Cog):
@@ -20,11 +51,15 @@ class ApplicationHandler(commands.Cog):
         self.channel_id = int(os.getenv('APPLICATION_CHANNEL_ID'))
         self.form_id = os.getenv('GOOGLE_FORM_ID')
         self.acceptance_threshold = int(os.getenv('ACCEPTANCE_THRESHOLD'))
+        self.denial_threshold = int(os.getenv('DENIAL_THRESHOLD', '1'))  # Default to 1 if not set
         self.accepted_role_id = int(os.getenv('MEMBER_ROLE'))
         self.discord_id_entry = os.getenv('DISCORD_ID_ENTRY', 'entry.1141798550')
 
         # Question mapping - will be built dynamically from form
         self.question_map = {}
+
+        # Track pending undo operations
+        self.pending_undos = {}
 
         # Start the polling task
         self.check_new_responses.start()
@@ -263,9 +298,9 @@ class ApplicationHandler(commands.Cog):
         if str(reaction.emoji) not in ['👍', '👎']:
             return
 
-        await self._handle_application_vote(reaction, app_data)
+        await self._handle_application_vote(reaction, app_data, user)
 
-    async def _handle_application_vote(self, reaction, app_data):
+    async def _handle_application_vote(self, reaction, app_data, user):
         """Handle voting on applications"""
         try:
             message = reaction.message
@@ -283,17 +318,121 @@ class ApplicationHandler(commands.Cog):
 
             logger.info(f"Application {response_id}: {thumbs_up} 👍, {thumbs_down} 👎")
 
-            # Check if acceptance threshold is met
-            if thumbs_up >= self.acceptance_threshold:
-                await self._accept_application(message, response_id)
-            elif thumbs_down >= self.acceptance_threshold:
-                await self._deny_application(message, response_id)
+            # Check if this vote is decisive (reaches threshold)
+            is_decisive = False
+            if thumbs_up >= self.acceptance_threshold and str(reaction.emoji) == '👍':
+                is_decisive = True
+                decision_type = "accept"
+            elif thumbs_down >= self.denial_threshold and str(reaction.emoji) == '👎':
+                is_decisive = True
+                decision_type = "deny"
+
+            # If this is a decisive vote, offer undo option
+            if is_decisive:
+                await self._offer_vote_undo(message, user, str(reaction.emoji), response_id, decision_type)
+
+            # Only process application if this isn't a decisive vote (which needs undo window)
+            # If it's a decisive vote, the processing will happen after the undo timeout
+            if not is_decisive:
+                # Check if acceptance threshold is met
+                if thumbs_up >= self.acceptance_threshold:
+                    await self._accept_application(message, response_id)
+                elif thumbs_down >= self.denial_threshold:
+                    await self._deny_application(message, response_id)
 
         except Exception as e:
             logger.error(f"Error handling vote for application {app_data['response_id']}: {e}")
 
+    async def _offer_vote_undo(self, message: discord.Message, user: discord.User, reaction_emoji: str,
+                               response_id: str, decision_type: str):
+        """Offer the user a chance to undo their decisive vote"""
+        try:
+            # Create undo button view
+            view = UndoButton(user.id, reaction_emoji)
+
+            # Send message in channel with undo button (only the specific user can use it)
+            undo_msg = await message.channel.send(
+                f"{user.mention}, your vote was decisive and will **{decision_type}** this application. You have 10 seconds to cancel your vote if this was a mistake.",
+                view=view,
+                delete_after=15  # Delete message after timeout + buffer
+            )
+
+            # Track this pending undo
+            self.pending_undos[response_id] = {
+                'user_id': user.id,
+                'reaction': reaction_emoji,
+                'message': message,
+                'decision_type': decision_type
+            }
+
+            # Wait for either button click or timeout
+            await view.wait()
+
+            # Clean up pending undo
+            if response_id in self.pending_undos:
+                del self.pending_undos[response_id]
+
+            if view.cancelled:
+                # User cancelled their vote - remove ONLY their reaction
+                try:
+                    await message.remove_reaction(reaction_emoji, user)
+                    logger.info(
+                        f"Removed {reaction_emoji} reaction from {user.display_name} on application {response_id}")
+
+                    # Recheck vote counts after removal
+                    await asyncio.sleep(0.5)  # Small delay to ensure reaction is removed
+                    await self._recheck_vote_counts(message, response_id)
+
+                except Exception as e:
+                    logger.error(f"Error removing reaction: {e}")
+            else:
+                # Timeout occurred - proceed with original decision
+                logger.info(f"Vote undo timeout for application {response_id}, proceeding with {decision_type}")
+                if decision_type == "accept":
+                    await self._accept_application(message, response_id)
+                else:
+                    await self._deny_application(message, response_id)
+
+        except Exception as e:
+            logger.error(f"Error in vote undo process: {e}")
+            # Clean up pending undo on error
+            if response_id in self.pending_undos:
+                del self.pending_undos[response_id]
+
+    async def _recheck_vote_counts(self, message: discord.Message, response_id: str):
+        """Recheck vote counts after a reaction is removed"""
+        try:
+            # Refresh message to get current reactions
+            message = await message.channel.fetch_message(message.id)
+
+            # Count current reactions (excluding bot)
+            thumbs_up = 0
+            thumbs_down = 0
+
+            for msg_reaction in message.reactions:
+                if str(msg_reaction.emoji) == '👍':
+                    thumbs_up = msg_reaction.count - 1  # Subtract bot reaction
+                elif str(msg_reaction.emoji) == '👎':
+                    thumbs_down = msg_reaction.count - 1  # Subtract bot reaction
+
+            logger.info(f"Rechecked application {response_id}: {thumbs_up} 👍, {thumbs_down} 👎")
+
+            # Check if threshold is still met
+            if thumbs_up >= self.acceptance_threshold:
+                await self._accept_application(message, response_id)
+            elif thumbs_down >= self.denial_threshold:
+                await self._deny_application(message, response_id)
+
+        except Exception as e:
+            logger.error(f"Error rechecking vote counts: {e}")
+
     async def _accept_application(self, message: discord.Message, response_id: str):
         """Accept an application"""
+        # Check if this application is already processed
+        app_data = self.db.get_application_by_message_id(message.id)
+        if app_data and app_data.get('status') in ['accepted', 'denied']:
+            return  # Already processed
+
         embed = message.embeds[0]
         now = datetime.now()
         unix_ts = int(now.timestamp())
@@ -302,6 +441,7 @@ class ApplicationHandler(commands.Cog):
         embed.colour = discord.Color.green()
 
         await message.edit(embed=embed)
+        # Remove all reactions when application is processed
         await message.clear_reactions()
 
         # Mark as processed in database
@@ -345,6 +485,11 @@ class ApplicationHandler(commands.Cog):
 
     async def _deny_application(self, message: discord.Message, response_id: str):
         """Deny an application"""
+        # Check if this application is already processed
+        app_data = self.db.get_application_by_message_id(message.id)
+        if app_data and app_data.get('status') in ['accepted', 'denied']:
+            return  # Already processed
+
         embed = message.embeds[0]
         now = datetime.now()
         unix_ts = int(now.timestamp())
@@ -353,6 +498,7 @@ class ApplicationHandler(commands.Cog):
         embed.colour = discord.Color.red()
 
         await message.edit(embed=embed)
+        # Remove all reactions when application is processed
         await message.clear_reactions()
 
         # Mark as processed in database

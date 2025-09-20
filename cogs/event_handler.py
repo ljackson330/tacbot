@@ -179,19 +179,6 @@ class EventHandler(commands.Cog):
         logger.info(f"{self.__class__.__name__} cog loaded")
         logger.info(f"Event schedule: Create events on Monday 8pm, Delete on Sunday midnight (US/Eastern)")
 
-        # TEST
-        await self._test_event_functions()
-
-    async def _test_event_functions(self):
-        """Temporary function to test event creation and deletion"""
-        logger.info("TESTING: Creating test event")
-        await self._create_weekly_event()
-
-        # Wait a bit so you can see the event was created
-        await asyncio.sleep(30)
-
-        logger.info("TESTING: Deleting test event")
-        await self._delete_old_event()
 
 async def setup(bot):
     """Function called when loading this cog"""
