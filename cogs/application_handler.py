@@ -11,6 +11,23 @@ from .database import Database
 logger = logging.getLogger(__name__)
 
 
+class ApplicationButtons(discord.ui.View):
+    def __init__(self, cog, response_id: str):
+        super().__init__(timeout=None)  # Persistent view
+        self.cog = cog
+        self.response_id = response_id
+
+    @discord.ui.button(label="Approve", style=discord.ButtonStyle.green)
+    async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Simulate adding a thumbs up reaction
+        await self.cog._handle_button_vote(interaction, "👍", self.response_id)
+
+    @discord.ui.button(label="Deny", style=discord.ButtonStyle.red)
+    async def deny_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Simulate adding a thumbs down reaction
+        await self.cog._handle_button_vote(interaction, "👎", self.response_id)
+
+
 class UndoButton(discord.ui.View):
     def __init__(self, user_id: int, original_reaction: str, timeout: float = 10.0):
         super().__init__(timeout=timeout)
@@ -32,8 +49,6 @@ class UndoButton(discord.ui.View):
             await interaction.message.delete()
         except:
             pass  # Message might already be deleted
-
-        await interaction.response.send_message("Vote cancelled! Your reaction has been removed.", ephemeral=True)
 
     async def on_timeout(self):
         # Disable the button after timeout
@@ -60,6 +75,9 @@ class ApplicationHandler(commands.Cog):
 
         # Track pending undo operations
         self.pending_undos = {}
+
+        # Track votes per application (response_id -> {user_id: vote_type})
+        self.application_votes = {}
 
         # Start the polling task
         self.check_new_responses.start()
@@ -115,11 +133,13 @@ class ApplicationHandler(commands.Cog):
                 return
 
             embed = await self._create_application_embed(response)
-            message = await channel.send(embed=embed)
 
-            # Add initial reactions
-            await message.add_reaction('👍')
-            await message.add_reaction('👎')
+            # Create buttons for voting
+            view = ApplicationButtons(self, response['responseId'])
+            message = await channel.send(embed=embed, view=view)
+
+            # Initialize vote tracking for this application
+            self.application_votes[response['responseId']] = {}
 
             # Store message info in database
             self.db.store_application_message(
@@ -225,6 +245,34 @@ class ApplicationHandler(commands.Cog):
             print(f"Error getting user by ID {discord_id}: {e}")
             return None
 
+    def _update_embed_with_vote_counts(self, embed: discord.Embed, response_id: str) -> discord.Embed:
+        """Update embed with current vote counts"""
+        if response_id not in self.application_votes:
+            return embed
+
+        votes = self.application_votes[response_id]
+        thumbs_up = sum(1 for vote in votes.values() if vote == '👍')
+        thumbs_down = sum(1 for vote in votes.values() if vote == '👎')
+
+        # Get voter names for display
+        approvers = [f"<@{uid}>" for uid, vote in votes.items() if vote == '👍']
+        deniers = [f"<@{uid}>" for uid, vote in votes.items() if vote == '👎']
+
+        # Add or update vote count field
+        vote_info = f"**Approvals ({thumbs_up}):** {', '.join(approvers) if approvers else 'None'}\n"
+        vote_info += f"**Denials ({thumbs_down}):** {', '.join(deniers) if deniers else 'None'}"
+
+        # Remove existing vote field if it exists
+        for i, field in enumerate(embed.fields):
+            if field.name == "Votes":
+                embed.remove_field(i)
+                break
+
+        # Add vote field at the end
+        embed.add_field(name="Votes", value=vote_info, inline=False)
+
+        return embed
+
     async def _create_application_embed(self, response: Dict[str, Any]) -> discord.Embed:
         # Parse timestamp
         iso_timestamp = response['createTime']
@@ -280,68 +328,97 @@ class ApplicationHandler(commands.Cog):
                     inline=False
                 )
 
+        # Add initial empty vote field
+        embed.add_field(name="Votes", value="**Approvals (0):** None\n**Denials (0):** None", inline=False)
+
         return embed
 
-    @commands.Cog.listener()
-    async def on_reaction_add(self, reaction, user):
-        """Handle reaction additions to application messages"""
-        # Ignore bot reactions
-        if user.bot:
-            return
-
-        # Check if this is an application message
-        app_data = self.db.get_application_by_message_id(reaction.message.id)
-        if not app_data:
-            return
-
-        # Only handle thumbs up/down reactions
-        if str(reaction.emoji) not in ['👍', '👎']:
-            return
-
-        await self._handle_application_vote(reaction, app_data, user)
-
-    async def _handle_application_vote(self, reaction, app_data, user):
-        """Handle voting on applications"""
+    async def _handle_button_vote(self, interaction: discord.Interaction, vote_type: str, response_id: str):
+        """Handle button-based voting on applications"""
         try:
-            message = reaction.message
-            response_id = app_data['response_id']
+            user = interaction.user
 
-            # Count current reactions (excluding bot)
-            thumbs_up = 0
-            thumbs_down = 0
+            # Check if user already voted
+            if response_id in self.application_votes:
+                if user.id in self.application_votes[response_id]:
+                    # User already voted - remove their previous vote or update it
+                    previous_vote = self.application_votes[response_id][user.id]
+                    if previous_vote == vote_type:
+                        # Same vote - remove it (toggle off)
+                        del self.application_votes[response_id][user.id]
 
-            for msg_reaction in message.reactions:
-                if str(msg_reaction.emoji) == '👍':
-                    thumbs_up = msg_reaction.count - 1  # Subtract bot reaction
-                elif str(msg_reaction.emoji) == '👎':
-                    thumbs_down = msg_reaction.count - 1  # Subtract bot reaction
+                        # Update the embed and respond
+                        embed = interaction.message.embeds[0]
+                        updated_embed = self._update_embed_with_vote_counts(embed, response_id)
+                        await interaction.response.edit_message(embed=updated_embed)
+
+                        # Recheck vote counts after removal
+                        await self._recheck_button_vote_counts(interaction.message, response_id)
+                        return
+                    else:
+                        # Different vote - update it
+                        self.application_votes[response_id][user.id] = vote_type
+
+                        # Update the embed and respond
+                        embed = interaction.message.embeds[0]
+                        updated_embed = self._update_embed_with_vote_counts(embed, response_id)
+                        await interaction.response.edit_message(embed=updated_embed)
+                        await interaction.followup.send(f"Changed your vote to {vote_type}.", ephemeral=True)
+                else:
+                    # New vote
+                    self.application_votes[response_id][user.id] = vote_type
+
+                    # Update the embed and respond
+                    embed = interaction.message.embeds[0]
+                    updated_embed = self._update_embed_with_vote_counts(embed, response_id)
+                    await interaction.response.edit_message(embed=updated_embed)
+            else:
+                # Initialize vote tracking for this response
+                self.application_votes[response_id] = {user.id: vote_type}
+
+                # Update the embed and respond
+                embed = interaction.message.embeds[0]
+                updated_embed = self._update_embed_with_vote_counts(embed, response_id)
+                await interaction.response.edit_message(embed=updated_embed)
+
+            # Count current votes
+            thumbs_up = sum(1 for vote in self.application_votes[response_id].values() if vote == '👍')
+            thumbs_down = sum(1 for vote in self.application_votes[response_id].values() if vote == '👎')
 
             logger.info(f"Application {response_id}: {thumbs_up} 👍, {thumbs_down} 👎")
 
             # Check if this vote is decisive (reaches threshold)
             is_decisive = False
-            if thumbs_up >= self.acceptance_threshold and str(reaction.emoji) == '👍':
+            if thumbs_up >= self.acceptance_threshold and vote_type == '👍':
                 is_decisive = True
                 decision_type = "accept"
-            elif thumbs_down >= self.denial_threshold and str(reaction.emoji) == '👎':
+            elif thumbs_down >= self.denial_threshold and vote_type == '👎':
                 is_decisive = True
                 decision_type = "deny"
 
             # If this is a decisive vote, offer undo option
             if is_decisive:
-                await self._offer_vote_undo(message, user, str(reaction.emoji), response_id, decision_type)
+                await self._offer_vote_undo(interaction.message, user, vote_type, response_id, decision_type)
 
             # Only process application if this isn't a decisive vote (which needs undo window)
             # If it's a decisive vote, the processing will happen after the undo timeout
             if not is_decisive:
                 # Check if acceptance threshold is met
                 if thumbs_up >= self.acceptance_threshold:
-                    await self._accept_application(message, response_id)
+                    await self._accept_application(interaction.message, response_id)
                 elif thumbs_down >= self.denial_threshold:
-                    await self._deny_application(message, response_id)
+                    await self._deny_application(interaction.message, response_id)
 
         except Exception as e:
-            logger.error(f"Error handling vote for application {app_data['response_id']}: {e}")
+            logger.error(f"Error handling button vote for application {response_id}: {e}")
+            try:
+                if not interaction.response.is_done():
+                    await interaction.response.send_message("An error occurred while processing your vote.",
+                                                            ephemeral=True)
+                else:
+                    await interaction.followup.send("An error occurred while processing your vote.", ephemeral=True)
+            except:
+                pass
 
     async def _offer_vote_undo(self, message: discord.Message, user: discord.User, reaction_emoji: str,
                                response_id: str, decision_type: str):
@@ -373,18 +450,24 @@ class ApplicationHandler(commands.Cog):
                 del self.pending_undos[response_id]
 
             if view.cancelled:
-                # User cancelled their vote - remove ONLY their reaction
+                # User cancelled their vote - remove their vote from tracking
                 try:
-                    await message.remove_reaction(reaction_emoji, user)
-                    logger.info(
-                        f"Removed {reaction_emoji} reaction from {user.display_name} on application {response_id}")
+                    if response_id in self.application_votes and user.id in self.application_votes[response_id]:
+                        del self.application_votes[response_id][user.id]
+                        logger.info(
+                            f"Removed {reaction_emoji} vote from {user.display_name} on application {response_id}")
+
+                    # Update the embed with new vote counts
+                    embed = message.embeds[0]
+                    updated_embed = self._update_embed_with_vote_counts(embed, response_id)
+                    await message.edit(embed=updated_embed)
 
                     # Recheck vote counts after removal
-                    await asyncio.sleep(0.5)  # Small delay to ensure reaction is removed
-                    await self._recheck_vote_counts(message, response_id)
+                    await asyncio.sleep(0.5)  # Small delay
+                    await self._recheck_button_vote_counts(message, response_id)
 
                 except Exception as e:
-                    logger.error(f"Error removing reaction: {e}")
+                    logger.error(f"Error removing vote: {e}")
             else:
                 # Timeout occurred - proceed with original decision
                 logger.info(f"Vote undo timeout for application {response_id}, proceeding with {decision_type}")
@@ -399,21 +482,15 @@ class ApplicationHandler(commands.Cog):
             if response_id in self.pending_undos:
                 del self.pending_undos[response_id]
 
-    async def _recheck_vote_counts(self, message: discord.Message, response_id: str):
-        """Recheck vote counts after a reaction is removed"""
+    async def _recheck_button_vote_counts(self, message: discord.Message, response_id: str):
+        """Recheck vote counts after a vote is removed"""
         try:
-            # Refresh message to get current reactions
-            message = await message.channel.fetch_message(message.id)
+            # Count current votes
+            if response_id not in self.application_votes:
+                return
 
-            # Count current reactions (excluding bot)
-            thumbs_up = 0
-            thumbs_down = 0
-
-            for msg_reaction in message.reactions:
-                if str(msg_reaction.emoji) == '👍':
-                    thumbs_up = msg_reaction.count - 1  # Subtract bot reaction
-                elif str(msg_reaction.emoji) == '👎':
-                    thumbs_down = msg_reaction.count - 1  # Subtract bot reaction
+            thumbs_up = sum(1 for vote in self.application_votes[response_id].values() if vote == '👍')
+            thumbs_down = sum(1 for vote in self.application_votes[response_id].values() if vote == '👎')
 
             logger.info(f"Rechecked application {response_id}: {thumbs_up} 👍, {thumbs_down} 👎")
 
@@ -426,6 +503,48 @@ class ApplicationHandler(commands.Cog):
         except Exception as e:
             logger.error(f"Error rechecking vote counts: {e}")
 
+    async def _get_member_and_role(self, response_id: str, guild: discord.Guild):
+        """Get the Discord member and role for application processing"""
+        responses = await self.google_service.get_form_responses(self.form_id)
+        target_response = next((r for r in responses if r['responseId'] == response_id), None)
+
+        if not target_response:
+            logger.error(f"Could not find response with ID {response_id}")
+            return None, None
+
+        answers = target_response.get('answers', {})
+        discord_id, _ = self._get_discord_id_from_answers(answers)
+
+        if not discord_id:
+            logger.warning(f"Could not extract Discord ID from response {response_id}")
+            return None, None
+
+        member = await self._get_discord_user_by_id(discord_id)
+        if not member:
+            logger.warning(f"Could not find member with Discord ID {discord_id}")
+            return None, None
+
+        role = guild.get_role(self.accepted_role_id)
+        if not role:
+            logger.error(f"Could not find role with ID {self.accepted_role_id}")
+            return member, None
+
+        return member, role
+
+    async def _notify_user(self, member: discord.Member, accepted: bool, guild_name: str):
+        """Send DM notification to user about application result"""
+        try:
+            status = "accepted" if accepted else "denied"
+            if accepted:
+                message = f"Your application to {guild_name} has been **accepted**! You now have access to the server."
+            else:
+                message = f"Your application to {guild_name} has been **denied**."
+
+            await member.send(message)
+            logger.info(f"Successfully notified {member.display_name} about {status}")
+        except discord.Forbidden:
+            logger.warning(f"Could not DM {member.display_name} about application result")
+
     async def _accept_application(self, message: discord.Message, response_id: str):
         """Accept an application"""
         # Check if this application is already processed
@@ -433,6 +552,7 @@ class ApplicationHandler(commands.Cog):
         if app_data and app_data.get('status') in ['accepted', 'denied']:
             return  # Already processed
 
+        # Update embed
         embed = message.embeds[0]
         now = datetime.now()
         unix_ts = int(now.timestamp())
@@ -440,46 +560,30 @@ class ApplicationHandler(commands.Cog):
         embed.remove_footer()
         embed.colour = discord.Color.green()
 
-        await message.edit(embed=embed)
-        # Remove all reactions when application is processed
-        await message.clear_reactions()
+        # Disable all buttons
+        view = discord.ui.View()
+        for item in view.children:
+            item.disabled = True
+
+        await message.edit(embed=embed, view=view)
 
         # Mark as processed in database
         self.db.set_application_status(response_id, 'accepted')
 
-        # Get the full response and extract Discord ID
-        responses = await self.google_service.get_form_responses(self.form_id)
-        target_response = next((r for r in responses if r['responseId'] == response_id), None)
+        # Clean up vote tracking
+        if response_id in self.application_votes:
+            del self.application_votes[response_id]
 
-        if target_response:
-            answers = target_response.get('answers', {})
-            discord_id, _ = self._get_discord_id_from_answers(answers)
+        # Get member and role
+        member, role = await self._get_member_and_role(response_id, message.guild)
 
-            if discord_id:
-                member = await self._get_discord_user_by_id(discord_id)
-                if member:
-                    try:
-                        role = message.guild.get_role(self.accepted_role_id)
-                        if role:
-                            await member.add_roles(role, reason=f"Application {response_id} accepted")
-                            logger.info(f"Added role {role.name} to {member.display_name}")
-
-                            # Try to DM the user about acceptance
-                            try:
-                                await member.send(
-                                    f"Your application to {message.guild.name} has been **accepted**! You now have access to the server.")
-                            except discord.Forbidden:
-                                logger.warning(f"Could not DM {member.display_name} about acceptance")
-                        else:
-                            logger.error(f"Could not find role with ID {self.accepted_role_id}")
-                    except Exception as e:
-                        logger.error(f"Error adding role to {member.display_name}: {e}")
-                else:
-                    logger.warning(f"Could not find member with Discord ID {discord_id}")
-            else:
-                logger.warning(f"Could not extract Discord ID from response {response_id}")
-        else:
-            logger.error(f"Could not find response with ID {response_id}")
+        if member and role:
+            try:
+                await member.add_roles(role, reason=f"Application {response_id} accepted")
+                logger.info(f"Added role {role.name} to {member.display_name}")
+                await self._notify_user(member, True, message.guild.name)
+            except Exception as e:
+                logger.error(f"Error adding role to {member.display_name}: {e}")
 
         logger.info(f"Application {response_id} accepted")
 
@@ -490,6 +594,7 @@ class ApplicationHandler(commands.Cog):
         if app_data and app_data.get('status') in ['accepted', 'denied']:
             return  # Already processed
 
+        # Update embed
         embed = message.embeds[0]
         now = datetime.now()
         unix_ts = int(now.timestamp())
@@ -497,37 +602,29 @@ class ApplicationHandler(commands.Cog):
         embed.remove_footer()
         embed.colour = discord.Color.red()
 
-        await message.edit(embed=embed)
-        # Remove all reactions when application is processed
-        await message.clear_reactions()
+        # Disable all buttons
+        view = discord.ui.View()
+        for item in view.children:
+            item.disabled = True
+
+        await message.edit(embed=embed, view=view)
 
         # Mark as processed in database
         self.db.set_application_status(response_id, 'denied')
 
-        # Get the full response and extract Discord ID
-        responses = await self.google_service.get_form_responses(self.form_id)
-        target_response = next((r for r in responses if r['responseId'] == response_id), None)
+        # Clean up vote tracking
+        if response_id in self.application_votes:
+            del self.application_votes[response_id]
 
-        if target_response:
-            answers = target_response.get('answers', {})
-            discord_id, _ = self._get_discord_id_from_answers(answers)
+        # Get member and kick them
+        member, _ = await self._get_member_and_role(response_id, message.guild)
 
-            if discord_id:
-                member = await self._get_discord_user_by_id(discord_id)
-                if member:
-                    try:
-                        # Kick the user
-                        await member.kick(reason=f"Application {response_id} denied")
-                        logger.info(f"Kicked {member.display_name} from the server")
-
-                    except Exception as e:
-                        logger.error(f"Error kicking {member.display_name}: {e}")
-                else:
-                    logger.warning(f"Could not find member with Discord ID {discord_id}")
-            else:
-                logger.warning(f"Could not extract Discord ID from response {response_id}")
-        else:
-            logger.error(f"Could not find response with ID {response_id}")
+        if member:
+            try:
+                await member.kick(reason=f"Application {response_id} denied")
+                logger.info(f"Kicked {member.display_name} from the server")
+            except Exception as e:
+                logger.error(f"Error kicking {member.display_name}: {e}")
 
         logger.info(f"Application {response_id} denied")
 
