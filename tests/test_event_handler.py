@@ -24,8 +24,10 @@ class TestEventHandler(unittest.TestCase):
             "TIMEZONE": "US/Eastern",
         }
 
-        with patch.dict("os.environ", env_vars), patch("cogs.event_handler.Database") as mock_db, patch(
-            "cogs.event_handler.tasks"
+        with (
+            patch.dict("os.environ", env_vars),
+            patch("cogs.event_handler.Database") as mock_db,
+            patch("cogs.event_handler.tasks"),
         ):  # Prevent task creation
 
             self.mock_db = mock_db.return_value

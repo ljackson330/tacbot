@@ -40,15 +40,15 @@ class EventHandler(commands.Cog):
             self.event_notification_role_id = int(os.getenv("EVENT_NOTIFICATION_ROLE_ID"))
 
             # Event timing configuration
-            self.event_time_hour = int(os.getenv("EVENT_TIME_HOUR", "17"))  # 5 PM
-            self.event_time_minute = int(os.getenv("EVENT_TIME_MINUTE", "0"))  # On the hour
-            self.create_day = int(os.getenv("EVENT_CREATE_DAY", "0"))  # Monday (0=Monday)
-            self.create_hour = int(os.getenv("EVENT_CREATE_HOUR", "20"))  # 8 PM
-            self.delete_day = int(os.getenv("EVENT_DELETE_DAY", "6"))  # Sunday
-            self.delete_hour = int(os.getenv("EVENT_DELETE_HOUR", "23"))  # 11 PM
+            self.event_time_hour = int(os.getenv("EVENT_TIME_HOUR"))  # 3 PM
+            self.event_time_minute = int(os.getenv("EVENT_TIME_MINUTE"))  # On the hour
+            self.create_day = int(os.getenv("EVENT_CREATE_DAY"))  # Monday
+            self.create_hour = int(os.getenv("EVENT_CREATE_HOUR"))  # 8 PM
+            self.delete_day = int(os.getenv("EVENT_DELETE_DAY"))  # Sunday
+            self.delete_hour = int(os.getenv("EVENT_DELETE_HOUR"))  # 11 PM
 
             # Timezone configuration
-            timezone_str = os.getenv("TIMEZONE", "US/Eastern")
+            timezone_str = os.getenv("TIMEZONE")
             self.timezone = pytz.timezone(timezone_str)
 
             # Task interval configuration

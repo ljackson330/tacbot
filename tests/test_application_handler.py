@@ -24,10 +24,11 @@ class TestApplicationHandler(unittest.TestCase):
         }
 
         # Patch everything needed to prevent async task creation
-        with patch("cogs.application_handler.Database") as mock_db, patch("cogs.application_handler.GoogleFormsService") as mock_google, patch.dict(
-            "os.environ", env_vars
-        ), patch(
-            "cogs.application_handler.tasks"
+        with (
+            patch("cogs.application_handler.Database") as mock_db,
+            patch("cogs.application_handler.GoogleFormsService") as mock_google,
+            patch.dict("os.environ", env_vars),
+            patch("cogs.application_handler.tasks"),
         ):  # Prevent task creation
 
             self.mock_db = mock_db.return_value
