@@ -4,6 +4,7 @@ from datetime import datetime
 import os
 import logging
 import asyncio
+import time
 from typing import Dict, Any, Optional, Tuple
 from .google_forms_service import GoogleFormsService
 from .database import Database
@@ -66,6 +67,14 @@ class ApplicationHandler(commands.Cog):
         # Thread lock for vote operations
         self._vote_lock = threading.Lock()
 
+        # Add rate limiting for Google API calls
+        self._api_call_times = []
+        self._max_calls_per_minute = 50  # Conservative limit
+
+        # Add request deduplication
+        self._recent_responses = {}  # response_id -> timestamp
+        self._response_cache_ttl = 300  # 5 minutes
+
         # Load configuration
         self._load_config()
 
@@ -105,6 +114,17 @@ class ApplicationHandler(commands.Cog):
                 raise
             setattr(self, attr, value)
 
+    def _is_rate_limited(self) -> bool:
+        """Check if we're approaching rate limits"""
+        now = time.time()
+        # Remove calls older than 1 minute
+        self._api_call_times = [t for t in self._api_call_times if now - t < 60]
+        return len(self._api_call_times) >= self._max_calls_per_minute
+
+    def _record_api_call(self):
+        """Record an API call timestamp"""
+        self._api_call_times.append(time.time())
+
     def cog_unload(self):
         """Cleanup when cog is unloaded."""
         self.check_new_responses.cancel()
@@ -125,10 +145,16 @@ class ApplicationHandler(commands.Cog):
     async def check_new_responses(self):
         """Check for new Google Form responses."""
         try:
+            # Check rate limiting
+            if self._is_rate_limited():
+                logger.warning("Rate limit reached, skipping this check")
+                return
+
             # Build question map if not already done
             if not self.question_map:
                 await self._build_question_map()
 
+            self._record_api_call()
             responses = await self.google_service.get_form_responses(self.form_id)
 
             for response in responses:
@@ -152,6 +178,11 @@ class ApplicationHandler(commands.Cog):
     async def _build_question_map(self):
         """Build question map from Google Form metadata."""
         try:
+            if self._is_rate_limited():
+                logger.warning("Rate limit reached, cannot build question map")
+                return
+
+            self._record_api_call()
             form_info = await self.google_service.get_form_info(self.form_id)
             self.question_map = self.google_service.build_question_map(form_info)
             logger.info(f"Built question map with {len(self.question_map)} questions")
@@ -228,11 +259,23 @@ class ApplicationHandler(commands.Cog):
             return None
 
     def _validate_discord_id(self, discord_id: str) -> bool:
-        """Validate Discord ID format."""
+        """Validate Discord ID format with proper sanitization"""
+        if not isinstance(discord_id, str):
+            return False
+
+        # Remove any whitespace and non-digit characters except for the ID itself
+        cleaned_id = ''.join(c for c in discord_id if c.isdigit())
+
+        # Discord IDs are exactly 17-20 digits (snowflakes)
+        if not (17 <= len(cleaned_id) <= 20):
+            return False
+
+        # Check if it's a reasonable snowflake (after Discord's epoch)
         try:
-            # Discord IDs are 17-19 digit numbers
-            return discord_id.isdigit() and 17 <= len(discord_id) <= 19
-        except (AttributeError, TypeError):
+            snowflake = int(cleaned_id)
+            # Discord epoch: 2015-01-01, minimum reasonable ID
+            return snowflake > 4194304  # First possible Discord ID
+        except (ValueError, OverflowError):
             return False
 
     async def _get_discord_member(self, discord_id: str, guild: discord.Guild) -> Optional[discord.Member]:
@@ -347,6 +390,11 @@ class ApplicationHandler(commands.Cog):
         # Remove or escape potential markdown/mentions
         text = text.replace('@', '@\u200b')  # Zero-width space to break mentions
         text = text.replace('`', '`\u200b')  # Break code blocks
+
+        # Additional sanitization for potential abuse
+        text = text.replace('http://', 'http[://]')  # Break HTTP links
+        text = text.replace('https://', 'https[://]')  # Break HTTPS links
+        text = text.replace('discord.gg/', 'discord[.]gg/')  # Break Discord invites
 
         return text.strip()
 
@@ -580,6 +628,11 @@ class ApplicationHandler(commands.Cog):
         Optional[discord.Member], Optional[discord.Role]]:
         """Get the Discord member and role for application processing."""
         try:
+            if self._is_rate_limited():
+                logger.warning("Rate limit reached, cannot fetch form responses")
+                return None, None
+
+            self._record_api_call()
             responses = await self.google_service.get_form_responses(self.form_id)
             target_response = next((r for r in responses if r['responseId'] == response_id), None)
 

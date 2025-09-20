@@ -10,3 +10,9 @@ google-api-python-client>=2.0.0
 
 # Environment and utilities
 python-dotenv>=1.0.0
+
+#Testing
+pytest
+pytest-asyncio
+pytest-mock
+pytest-cov

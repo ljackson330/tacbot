@@ -3,31 +3,66 @@ import os
 import logging
 from typing import Optional, Dict, Any
 import threading
+import time
 
 logger = logging.getLogger(__name__)
 
 
 class Database:
     def __init__(self, db_path: str = None):
-        self.db_path = db_path or os.getenv('DATABASE_PATH')
-        self._local = threading.local()
+        self.db_path = db_path or os.getenv('DATABASE_PATH', 'tacbot.db')
+        self._lock = threading.RLock()  # Use RLock for better thread safety
         self._initialize_database()
 
     def _get_connection(self):
-        """Get a thread-local database connection"""
-        if not hasattr(self._local, 'connection'):
-            self._local.connection = sqlite3.connect(self.db_path)
-            self._local.connection.row_factory = sqlite3.Row
-        return self._local.connection
+        """Get a thread-safe database connection with proper error handling"""
+        try:
+            conn = sqlite3.connect(self.db_path, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            return conn
+        except sqlite3.Error as e:
+            logger.error(f"Database connection error: {e}")
+            raise
+
+    def _execute_with_retry(self, query: str, params: tuple = (), fetch_one: bool = False,
+                            fetch_all: bool = False, commit: bool = True):
+        """Execute database operations with retry logic and proper error handling"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            conn = None
+            try:
+                with self._lock:
+                    conn = self._get_connection()
+                    cursor = conn.cursor()
+                    cursor.execute(query, params)
+
+                    if commit:
+                        conn.commit()
+
+                    if fetch_one:
+                        return cursor.fetchone()
+                    elif fetch_all:
+                        return cursor.fetchall()
+
+                    return cursor.rowcount
+
+            except sqlite3.OperationalError as e:
+                logger.warning(f"Database operation failed (attempt {attempt + 1}): {e}")
+                if attempt == max_retries - 1:
+                    raise
+                time.sleep(0.1 * (2 ** attempt))  # Exponential backoff
+            except Exception as e:
+                logger.error(f"Unexpected database error: {e}")
+                raise
+            finally:
+                if conn:
+                    conn.close()
 
     def _initialize_database(self):
         """Create database tables if they don't exist"""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-
             # Table for tracking processed responses
-            cursor.execute('''
+            self._execute_with_retry('''
                 CREATE TABLE IF NOT EXISTS processed_responses (
                     response_id TEXT PRIMARY KEY,
                     processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -35,7 +70,7 @@ class Database:
             ''')
 
             # Table for application messages and their status
-            cursor.execute('''
+            self._execute_with_retry('''
                 CREATE TABLE IF NOT EXISTS applications (
                     response_id TEXT PRIMARY KEY,
                     message_id INTEGER,
@@ -46,7 +81,6 @@ class Database:
                 )
             ''')
 
-            conn.commit()
             logger.info("Database initialized successfully")
 
         except Exception as e:
@@ -56,15 +90,12 @@ class Database:
     def is_response_processed(self, response_id: str) -> bool:
         """Check if a response has already been processed"""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-
-            cursor.execute(
+            result = self._execute_with_retry(
                 "SELECT 1 FROM processed_responses WHERE response_id = ?",
-                (response_id,)
+                (response_id,),
+                fetch_one=True
             )
-
-            return cursor.fetchone() is not None
+            return result is not None
 
         except Exception as e:
             logger.error(f"Error checking if response is processed: {e}")
@@ -73,15 +104,10 @@ class Database:
     def mark_response_processed(self, response_id: str):
         """Mark a response as processed"""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-
-            cursor.execute(
+            self._execute_with_retry(
                 "INSERT OR IGNORE INTO processed_responses (response_id) VALUES (?)",
                 (response_id,)
             )
-
-            conn.commit()
 
         except Exception as e:
             logger.error(f"Error marking response as processed: {e}")
@@ -89,16 +115,11 @@ class Database:
     def store_application_message(self, response_id: str, message_id: int, channel_id: int):
         """Store information about an application message"""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-
-            cursor.execute('''
+            self._execute_with_retry('''
                 INSERT OR REPLACE INTO applications 
                 (response_id, message_id, channel_id, status, updated_at) 
                 VALUES (?, ?, ?, 'pending', CURRENT_TIMESTAMP)
             ''', (response_id, message_id, channel_id))
-
-            conn.commit()
 
         except Exception as e:
             logger.error(f"Error storing application message: {e}")
@@ -106,15 +127,11 @@ class Database:
     def get_application_by_message_id(self, message_id: int) -> Optional[Dict[str, Any]]:
         """Get application data by Discord message ID"""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-
-            cursor.execute(
+            row = self._execute_with_retry(
                 "SELECT * FROM applications WHERE message_id = ?",
-                (message_id,)
+                (message_id,),
+                fetch_one=True
             )
-
-            row = cursor.fetchone()
             return dict(row) if row else None
 
         except Exception as e:
@@ -124,16 +141,11 @@ class Database:
     def set_application_status(self, response_id: str, status: str):
         """Update the status of an application"""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-
-            cursor.execute('''
+            self._execute_with_retry('''
                 UPDATE applications 
                 SET status = ?, updated_at = CURRENT_TIMESTAMP 
                 WHERE response_id = ?
             ''', (status, response_id))
-
-            conn.commit()
 
         except Exception as e:
             logger.error(f"Error updating application status: {e}")
@@ -141,15 +153,11 @@ class Database:
     def get_application_status(self, response_id: str) -> Optional[Dict[str, Any]]:
         """Get the status of an application"""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-
-            cursor.execute(
+            row = self._execute_with_retry(
                 "SELECT * FROM applications WHERE response_id = ?",
-                (response_id,)
+                (response_id,),
+                fetch_one=True
             )
-
-            row = cursor.fetchone()
             return dict(row) if row else None
 
         except Exception as e:
@@ -159,22 +167,17 @@ class Database:
     def record_vote(self, response_id: str, user_id: int, vote: str):
         """Record a vote on an application"""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-
             # Remove any existing vote from this user for this application
-            cursor.execute(
+            self._execute_with_retry(
                 "DELETE FROM application_votes WHERE response_id = ? AND user_id = ?",
                 (response_id, user_id)
             )
 
             # Insert the new vote
-            cursor.execute('''
+            self._execute_with_retry('''
                 INSERT INTO application_votes (response_id, user_id, vote) 
                 VALUES (?, ?, ?)
             ''', (response_id, user_id, vote))
-
-            conn.commit()
 
         except Exception as e:
             logger.error(f"Error recording vote: {e}")
@@ -182,15 +185,11 @@ class Database:
     def cleanup_old_data(self, days: int = 30):
         """Clean up old processed responses (optional maintenance)"""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-
-            cursor.execute('''
+            self._execute_with_retry('''
                 DELETE FROM processed_responses 
                 WHERE processed_at < datetime('now', ? || ' days')
             ''', (f'-{days}',))
 
-            conn.commit()
             logger.info(f"Cleaned up old data older than {days} days")
 
         except Exception as e:
@@ -199,16 +198,14 @@ class Database:
     # ===== NEW METHODS FOR IMPROVED APPLICATION HANDLER =====
 
     def initialize_applications_table(self):
-        """Initialize the applications table (already exists above, but ensuring consistency)"""
+        """Initialize the applications table (already exists above, but keeping for API consistency)"""
         # This is already handled in _initialize_database, but keeping for API consistency
         pass
 
     def initialize_votes_table(self):
         """Initialize the votes table for application voting."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
+            self._execute_with_retry("""
                 CREATE TABLE IF NOT EXISTS votes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     response_id TEXT NOT NULL,
@@ -218,7 +215,6 @@ class Database:
                     UNIQUE(response_id, user_id)
                 )
             """)
-            conn.commit()
             logger.info("Votes table initialized")
         except Exception as e:
             logger.error(f"Error initializing votes table: {e}")
@@ -227,13 +223,10 @@ class Database:
     def add_vote(self, response_id: str, user_id: int, vote_type: str):
         """Add a new vote for an application."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
+            self._execute_with_retry("""
                 INSERT INTO votes (response_id, user_id, vote_type)
                 VALUES (?, ?, ?)
             """, (response_id, user_id, vote_type))
-            conn.commit()
         except Exception as e:
             logger.error(f"Error adding vote: {e}")
             raise
@@ -241,14 +234,11 @@ class Database:
     def update_vote(self, response_id: str, user_id: int, vote_type: str):
         """Update an existing vote."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
+            self._execute_with_retry("""
                 UPDATE votes 
                 SET vote_type = ?, created_at = CURRENT_TIMESTAMP
                 WHERE response_id = ? AND user_id = ?
             """, (vote_type, response_id, user_id))
-            conn.commit()
         except Exception as e:
             logger.error(f"Error updating vote: {e}")
             raise
@@ -256,13 +246,10 @@ class Database:
     def remove_vote(self, response_id: str, user_id: int):
         """Remove a vote from an application."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
+            self._execute_with_retry("""
                 DELETE FROM votes 
                 WHERE response_id = ? AND user_id = ?
             """, (response_id, user_id))
-            conn.commit()
         except Exception as e:
             logger.error(f"Error removing vote: {e}")
             raise
@@ -270,13 +257,10 @@ class Database:
     def get_user_vote(self, response_id: str, user_id: int) -> Optional[str]:
         """Get a user's current vote for an application."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
+            result = self._execute_with_retry("""
                 SELECT vote_type FROM votes 
                 WHERE response_id = ? AND user_id = ?
-            """, (response_id, user_id))
-            result = cursor.fetchone()
+            """, (response_id, user_id), fetch_one=True)
             return result[0] if result else None
         except Exception as e:
             logger.error(f"Error getting user vote: {e}")
@@ -285,15 +269,13 @@ class Database:
     def get_votes(self, response_id: str) -> list:
         """Get all votes for an application."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
+            rows = self._execute_with_retry("""
                 SELECT user_id, vote_type, created_at FROM votes 
                 WHERE response_id = ?
                 ORDER BY created_at DESC
-            """, (response_id,))
+            """, (response_id,), fetch_all=True)
             return [{'user_id': row[0], 'vote_type': row[1], 'created_at': row[2]}
-                    for row in cursor.fetchall()]
+                    for row in rows]
         except Exception as e:
             logger.error(f"Error getting votes: {e}")
             return []
@@ -301,69 +283,66 @@ class Database:
     def get_vote_counts(self, response_id: str) -> dict:
         """Get vote counts for an application."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
+            rows = self._execute_with_retry("""
                 SELECT vote_type, COUNT(*) FROM votes 
                 WHERE response_id = ?
                 GROUP BY vote_type
-            """, (response_id,))
-            return {row[0]: row[1] for row in cursor.fetchall()}
+            """, (response_id,), fetch_all=True)
+            return {row[0]: row[1] for row in rows}
         except Exception as e:
             logger.error(f"Error getting vote counts: {e}")
             return {}
 
     def get_application_stats(self) -> dict:
-        """Get application statistics."""
+        """Get application statistics with proper SQL parameterization."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
             stats = {}
 
-            # Total applications
-            cursor.execute("SELECT COUNT(*) FROM applications")
-            stats['total'] = cursor.fetchone()[0]
+            # Use parameterized queries and proper error handling
+            total_result = self._execute_with_retry("SELECT COUNT(*) FROM applications", fetch_one=True)
+            stats['total'] = total_result[0] if total_result else 0
 
-            # Status breakdown - handle both 'accepted'/'denied' and 'accept'/'deny'
-            cursor.execute("""
+            # Status breakdown with CASE normalization
+            status_results = self._execute_with_retry("""
                 SELECT 
                     CASE 
-                        WHEN status = 'accept' THEN 'accepted'
-                        WHEN status = 'deny' THEN 'denied'
+                        WHEN status = ? THEN ?
+                        WHEN status = ? THEN ?
                         ELSE status 
                     END as normalized_status, 
                     COUNT(*) 
                 FROM applications 
-                WHERE status IS NOT NULL AND status != 'pending'
+                WHERE status IS NOT NULL AND status != ?
                 GROUP BY normalized_status
-            """)
-            for status, count in cursor.fetchall():
+            """, ('accept', 'accepted', 'deny', 'denied', 'pending'), fetch_all=True)
+
+            for status, count in status_results:
                 stats[status] = count
 
-            # Ensure accepted and denied exist even if 0
-            if 'accepted' not in stats:
-                stats['accepted'] = 0
-            if 'denied' not in stats:
-                stats['denied'] = 0
+            # Ensure all expected keys exist
+            for key in ['accepted', 'denied']:
+                if key not in stats:
+                    stats[key] = 0
 
-            # Pending (no status or status = 'pending')
-            cursor.execute("SELECT COUNT(*) FROM applications WHERE status IS NULL OR status = 'pending'")
-            stats['pending'] = cursor.fetchone()[0]
+            # Pending count
+            pending_result = self._execute_with_retry(
+                "SELECT COUNT(*) FROM applications WHERE status IS NULL OR status = ?",
+                ('pending',), fetch_one=True
+            )
+            stats['pending'] = pending_result[0] if pending_result else 0
 
             return stats
+
         except Exception as e:
             logger.error(f"Error getting application stats: {e}")
-            return {}
+            return {'total': 0, 'accepted': 0, 'denied': 0, 'pending': 0}
 
     # ===== EXISTING EVENT METHODS (keeping them as they are) =====
 
     def initialize_events_table(self):
         """Initialize the events table"""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-
-            cursor.execute('''
+            self._execute_with_retry('''
                 CREATE TABLE IF NOT EXISTS events (
                     event_id INTEGER PRIMARY KEY,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -374,7 +353,6 @@ class Database:
                 )
             ''')
 
-            conn.commit()
             logger.info("Events table initialized")
         except Exception as e:
             logger.error(f"Error initializing events table: {e}")
@@ -382,10 +360,8 @@ class Database:
     def has_active_event(self) -> bool:
         """Check if there's an active event"""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM events WHERE deleted = 0")
-            return cursor.fetchone()[0] > 0
+            result = self._execute_with_retry("SELECT COUNT(*) FROM events WHERE deleted = 0", fetch_one=True)
+            return result[0] > 0
         except Exception as e:
             logger.error(f"Error checking active event: {e}")
             return False
@@ -393,25 +369,20 @@ class Database:
     def store_event(self, event_id: int, event_date):
         """Store event in database"""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute('''
+            self._execute_with_retry('''
                 INSERT INTO events (event_id, event_date, deleted)
                 VALUES (?, ?, 0)
             ''', (event_id, event_date))
-            conn.commit()
         except Exception as e:
             logger.error(f"Error storing event: {e}")
 
     def get_active_event(self):
         """Get active event"""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT * FROM events WHERE deleted = 0 ORDER BY created_at DESC LIMIT 1"
+            row = self._execute_with_retry(
+                "SELECT * FROM events WHERE deleted = 0 ORDER BY created_at DESC LIMIT 1",
+                fetch_one=True
             )
-            row = cursor.fetchone()
             return dict(row) if row else None
         except Exception as e:
             logger.error(f"Error getting active event: {e}")
@@ -420,14 +391,11 @@ class Database:
     def get_all_active_events(self) -> list:
         """Get all active events from the database."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
+            rows = self._execute_with_retry("""
                 SELECT event_id, event_date FROM events 
                 WHERE deleted = 0
-            """)
-            return [{'event_id': row[0], 'event_date': row[1]}
-                    for row in cursor.fetchall()]
+            """, fetch_all=True)
+            return [{'event_id': row[0], 'event_date': row[1]} for row in rows]
         except Exception as e:
             logger.error(f"Error getting active events: {e}")
             return []
@@ -435,57 +403,48 @@ class Database:
     def update_event_participants(self, event_id: int, count: int, users: list):
         """Update event participants"""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
             users_str = ','.join(users) if users else ''
-            cursor.execute('''
+            self._execute_with_retry('''
                 UPDATE events 
                 SET participant_count = ?, participant_names = ?
                 WHERE event_id = ?
             ''', (count, users_str, event_id))
-            conn.commit()
         except Exception as e:
             logger.error(f"Error updating participants: {e}")
 
     def mark_event_deleted(self, event_id: int):
         """Mark event as deleted"""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute('''
+            self._execute_with_retry('''
                 UPDATE events SET deleted = 1 WHERE event_id = ?
             ''', (event_id,))
-            conn.commit()
         except Exception as e:
             logger.error(f"Error marking event deleted: {e}")
 
     def get_event_stats(self) -> dict:
         """Get event statistics."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
             stats = {}
 
             # Total events created
-            cursor.execute("SELECT COUNT(*) FROM events")
-            stats['total_events'] = cursor.fetchone()[0]
+            total_result = self._execute_with_retry("SELECT COUNT(*) FROM events", fetch_one=True)
+            stats['total_events'] = total_result[0] if total_result else 0
 
             # Active events
-            cursor.execute("SELECT COUNT(*) FROM events WHERE deleted = 0")
-            stats['active_events'] = cursor.fetchone()[0]
+            active_result = self._execute_with_retry("SELECT COUNT(*) FROM events WHERE deleted = 0", fetch_one=True)
+            stats['active_events'] = active_result[0] if active_result else 0
 
             # Completed events
-            cursor.execute("SELECT COUNT(*) FROM events WHERE deleted = 1")
-            stats['completed_events'] = cursor.fetchone()[0]
+            completed_result = self._execute_with_retry("SELECT COUNT(*) FROM events WHERE deleted = 1", fetch_one=True)
+            stats['completed_events'] = completed_result[0] if completed_result else 0
 
             # Average participants for completed events
-            cursor.execute("""
+            avg_result = self._execute_with_retry("""
                 SELECT AVG(participant_count) FROM events 
                 WHERE deleted = 1 AND participant_count IS NOT NULL
-            """)
-            result = cursor.fetchone()[0]
-            if result:
-                stats['avg_participants'] = float(result)
+            """, fetch_one=True)
+            if avg_result and avg_result[0]:
+                stats['avg_participants'] = float(avg_result[0])
 
             return stats
         except Exception as e:
@@ -494,5 +453,6 @@ class Database:
 
     def close(self):
         """Close database connection"""
-        if hasattr(self._local, 'connection'):
-            self._local.connection.close()
+        # With the new connection handling, there's no persistent connection to close
+        # But keeping this method for API compatibility
+        pass
