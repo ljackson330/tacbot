@@ -218,6 +218,93 @@ class Database:
         except Exception as e:
             logger.error(f"Error cleaning up old data: {e}")
 
+    def initialize_events_table(self):
+        """Initialize the events table"""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS events (
+                    event_id INTEGER PRIMARY KEY,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    event_date DATE,
+                    interested_count INTEGER DEFAULT 0,
+                    interested_users TEXT DEFAULT '',
+                    status TEXT DEFAULT 'active'
+                )
+            ''')
+
+            conn.commit()
+            logger.info("Events table initialized")
+        except Exception as e:
+            logger.error(f"Error initializing events table: {e}")
+
+    def has_active_event(self) -> bool:
+        """Check if there's an active event"""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM events WHERE status = 'active'")
+            return cursor.fetchone()[0] > 0
+        except Exception as e:
+            logger.error(f"Error checking active event: {e}")
+            return False
+
+    def store_event(self, event_id: int, event_date):
+        """Store event in database"""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                INSERT INTO events (event_id, event_date, status)
+                VALUES (?, ?, 'active')
+            ''', (event_id, event_date))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Error storing event: {e}")
+
+    def get_active_event(self):
+        """Get active event"""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM events WHERE status = 'active' ORDER BY created_at DESC LIMIT 1"
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+        except Exception as e:
+            logger.error(f"Error getting active event: {e}")
+            return None
+
+    def update_event_participants(self, event_id: int, count: int, users: list):
+        """Update event participants"""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            users_str = ','.join(users) if users else ''
+            cursor.execute('''
+                UPDATE events 
+                SET interested_count = ?, interested_users = ?
+                WHERE event_id = ?
+            ''', (count, users_str, event_id))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Error updating participants: {e}")
+
+    def mark_event_deleted(self, event_id: int):
+        """Mark event as deleted"""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute('''
+                UPDATE events SET status = 'deleted' WHERE event_id = ?
+            ''', (event_id,))
+            conn.commit()
+        except Exception as e:
+            logger.error(f"Error marking event deleted: {e}")
+
     def close(self):
         """Close database connection"""
         if hasattr(self._local, 'connection'):

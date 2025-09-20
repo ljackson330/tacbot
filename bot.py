@@ -32,7 +32,9 @@ class TacBot(commands.Bot):
     async def setup_hook(self):
         """Called when the bot is starting up"""
         cogs_to_load = [
-            'cogs.application_handler'
+            'cogs.application_handler',
+            'cogs.chat_commands',
+            'cogs.event_handler'
         ]
 
         for cog in cogs_to_load:
@@ -45,6 +47,13 @@ class TacBot(commands.Bot):
     async def on_ready(self):
         logging.info(f'TacBot has connected to Discord as {self.user}')
         logging.info(f'Bot ID: {self.user.id}')
+
+        # Sync slash commands
+        try:
+            synced = await self.tree.sync()
+            logging.info(f"Synced {len(synced)} command(s)")
+        except Exception as e:
+            logging.error(f"Failed to sync commands: {e}")
 
 
 async def main():
