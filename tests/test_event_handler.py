@@ -17,10 +17,10 @@ class TestEventHandler(unittest.TestCase):
             "EVENT_NOTIFICATION_ROLE_ID": "666666666",
             "EVENT_TIME_HOUR": "17",
             "EVENT_TIME_MINUTE": "0",
-            "CREATE_DAY": "0",  # Monday
-            "CREATE_HOUR": "20",  # 8 PM
-            "DELETE_DAY": "6",  # Sunday
-            "DELETE_HOUR": "0",  # Midnight
+            "EVENT_CREATE_DAY": "0",  # Monday
+            "EVENT_CREATE_HOUR": "20",  # 8 PM
+            "EVENT_DELETE_DAY": "6",  # Sunday
+            "EVENT_DELETE_HOUR": "0",  # Midnight
             "TIMEZONE": "US/Eastern",
         }
 

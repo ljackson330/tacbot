@@ -37,6 +37,10 @@ def mock_env_vars():
         "DENIAL_THRESHOLD": "2",
         "APPLICATION_POLL_INTERVAL": "30",
         "DATABASE_PATH": ":memory:",
+        "EVENT_CREATE_DAY": "0",  # Monday
+        "EVENT_CREATE_HOUR": "20",  # 8 PM
+        "EVENT_DELETE_DAY": "6",  # Sunday
+        "EVENT_DELETE_HOUR": "0",  # Midnight
     }
 
     with patch.dict("os.environ", test_env):
