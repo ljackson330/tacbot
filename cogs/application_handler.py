@@ -436,7 +436,7 @@ class ApplicationHandler(commands.Cog):
         embed = message.embeds[0]
         now = datetime.now()
         unix_ts = int(now.timestamp())
-        embed.description += f"\n**Application approved:** <t:{unix_ts}:f>"
+        embed.description += f"\n**Approved:** <t:{unix_ts}:f>"
         embed.remove_footer()
         embed.colour = discord.Color.green()
 
@@ -493,7 +493,7 @@ class ApplicationHandler(commands.Cog):
         embed = message.embeds[0]
         now = datetime.now()
         unix_ts = int(now.timestamp())
-        embed.description += f"\n**Application denied:** <t:{unix_ts}:f>"
+        embed.description += f"\n**Denied:** <t:{unix_ts}:f>"
         embed.remove_footer()
         embed.colour = discord.Color.red()
 
