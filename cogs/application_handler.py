@@ -66,9 +66,14 @@ class ApplicationHandler(commands.Cog):
         # Thread lock for vote operations
         self._vote_lock = threading.Lock()
 
-        # Add rate limiting for Google API calls
+        # Better rate limiting implementation
         self._api_call_times = []
-        self._max_calls_per_minute = 50  # Conservative limit
+        self._max_calls_per_minute = 30  # More conservative limit
+        self._rate_limit_window = 60  # 1-minute window
+
+        # Add backoff when rate limited
+        self._last_rate_limit_time = 0
+        self._rate_limit_backoff = 60  # Wait 1 minute when rate limited
 
         # Add request deduplication
         self._recent_responses = {}  # response_id -> timestamp
@@ -109,19 +114,30 @@ class ApplicationHandler(commands.Cog):
             try:
                 value = cast(raw_value) if raw_value is not None else None
             except (ValueError, TypeError) as e:
-                logger.error(
-                    f"Invalid value for {env_var}: {
-                        raw_value!r} ({e})"
-                )
+                logger.error(f"Invalid value for {env_var}: {raw_value!r} ({e})")
                 raise
             setattr(self, attr, value)
 
     def _is_rate_limited(self) -> bool:
-        """Check if we're approaching rate limits"""
+        """Better rate limiting check with backoff"""
         now = time.time()
-        # Remove calls older than 1 minute
-        self._api_call_times = [t for t in self._api_call_times if now - t < 60]
-        return len(self._api_call_times) >= self._max_calls_per_minute
+
+        # Check if we're still in backoff period from previous rate limit
+        if now - self._last_rate_limit_time < self._rate_limit_backoff:
+            return True
+
+        # Clean old timestamps
+        cutoff = now - self._rate_limit_window
+        self._api_call_times = [t for t in self._api_call_times if t > cutoff]
+
+        # Check if we're approaching limits
+        is_limited = len(self._api_call_times) >= self._max_calls_per_minute
+
+        if is_limited:
+            self._last_rate_limit_time = now
+            logger.warning(f"Rate limit reached: {len(self._api_call_times)}/{self._max_calls_per_minute} calls in last {self._rate_limit_window}s")
+
+        return is_limited
 
     def _record_api_call(self):
         """Record an API call timestamp"""
@@ -140,24 +156,40 @@ class ApplicationHandler(commands.Cog):
     async def _cleanup_stale_data(self):
         """Clean up any stale processing states on startup."""
         self._processing_applications.clear()
-        # Could also clean up old votes or applications here if needed
+        # Reset rate limiting on startup
+        self._api_call_times.clear()
+        self._last_rate_limit_time = 0
         logger.info("Cleaned up stale application data")
 
     @tasks.loop(seconds=30)  # Default 30 seconds, configurable
     async def check_new_responses(self):
         """Check for new Google Form responses."""
         try:
-            # Check rate limiting
+            # Check rate limiting with better logging
             if self._is_rate_limited():
-                logger.warning("Rate limit reached, skipping this check")
+                # Don't log this every time - only occasionally
+                if len(self._api_call_times) % 10 == 0 or not hasattr(self, "_last_rate_limit_log"):
+                    logger.info("Rate limit active, skipping check (this message appears occasionally)")
+                    self._last_rate_limit_log = time.time()
                 return
 
             # Build question map if not already done
             if not self.question_map:
                 await self._build_question_map()
+                # If building question map failed due to rate limit, skip this iteration
+                if not self.question_map:
+                    return
 
+            # Record API call BEFORE making it
             self._record_api_call()
-            responses = await self.google_service.get_form_responses(self.form_id)
+
+            try:
+                responses = await self.google_service.get_form_responses(self.form_id)
+            except Exception as e:
+                # Don't record API call if it failed
+                if self._api_call_times:
+                    self._api_call_times.pop()
+                raise e
 
             for response in responses:
                 response_id = response["responseId"]
@@ -175,19 +207,29 @@ class ApplicationHandler(commands.Cog):
         """Wait until bot is ready before starting the loop."""
         await self.bot.wait_until_ready()
         # Update loop interval if configured
-        self.check_new_responses.change_interval(seconds=self.poll_interval)
+        if hasattr(self, "poll_interval") and self.poll_interval:
+            self.check_new_responses.change_interval(seconds=self.poll_interval)
 
     async def _build_question_map(self):
         """Build question map from Google Form metadata."""
         try:
             if self._is_rate_limited():
-                logger.warning("Rate limit reached, cannot build question map")
+                logger.debug("Rate limit reached, cannot build question map")
                 return
 
+            # Record API call BEFORE making it
             self._record_api_call()
-            form_info = await self.google_service.get_form_info(self.form_id)
-            self.question_map = self.google_service.build_question_map(form_info)
-            logger.info(f"Built question map with {len(self.question_map)} questions")
+
+            try:
+                form_info = await self.google_service.get_form_info(self.form_id)
+                self.question_map = self.google_service.build_question_map(form_info)
+                logger.info(f"Built question map with {len(self.question_map)} questions")
+            except Exception as e:
+                # Remove the recorded API call if it failed
+                if self._api_call_times:
+                    self._api_call_times.pop()
+                raise e
+
         except Exception as e:
             logger.error(f"Error building question map: {e}")
             # Fallback to basic mapping if form info fails
@@ -205,10 +247,7 @@ class ApplicationHandler(commands.Cog):
 
             channel = guild.get_channel(self.channel_id)
             if not channel:
-                logger.error(
-                    f"Could not find channel with ID {
-                        self.channel_id}"
-                )
+                logger.error(f"Could not find channel with ID {self.channel_id}")
                 return
 
             embed = await self._create_application_embed(response, guild)
@@ -288,33 +327,21 @@ class ApplicationHandler(commands.Cog):
         """Get Discord member by ID from the specified guild."""
         try:
             discord_id_int = int(discord_id)
-            logger.debug(
-                f"Looking for Discord ID: {discord_id_int} in guild: {
-                    guild.name}"
-            )
+            logger.debug(f"Looking for Discord ID: {discord_id_int} in guild: {guild.name}")
 
             # Try get_member first (cached members only)
             member = guild.get_member(discord_id_int)
             if member:
-                logger.debug(
-                    f"Found member via get_member: {
-                        member.display_name}"
-                )
+                logger.debug(f"Found member via get_member: {member.display_name}")
                 return member
 
             # If not in cache, try fetching from Discord API
             try:
                 member = await guild.fetch_member(discord_id_int)
-                logger.debug(
-                    f"Found member via fetch_member: {
-                        member.display_name}"
-                )
+                logger.debug(f"Found member via fetch_member: {member.display_name}")
                 return member
             except discord.NotFound:
-                logger.warning(
-                    f"Member {discord_id_int} not found in guild {
-                        guild.name}"
-                )
+                logger.warning(f"Member {discord_id_int} not found in guild {guild.name}")
                 return None
             except discord.HTTPException as e:
                 logger.error(f"HTTP error fetching member {discord_id_int}: {e}")
@@ -542,8 +569,7 @@ class ApplicationHandler(commands.Cog):
             approvals_count = vote_counts.get("approve", 0)
             denials_count = vote_counts.get("deny", 0)
 
-            vote_info = f"**Approvals ({approvals_count}):** {
-                ', '.join(approvers) if approvers else 'None'}\n"
+            vote_info = f"**Approvals ({approvals_count}):** {', '.join(approvers) if approvers else 'None'}\n"
             vote_info += f"**Denials ({denials_count}):** {', '.join(deniers) if deniers else 'None'}"
 
             # Update or add vote field
@@ -584,11 +610,11 @@ class ApplicationHandler(commands.Cog):
             unix_ts = int(now.timestamp())
 
             if decision == "accept":
-                embed.description += f"\n**✅ Accepted:** <t:{unix_ts}:f>"
+                embed.description += f"\n**Accepted:** <t:{unix_ts}:f>"
                 embed.colour = discord.Color.green()
                 await self._handle_acceptance(guild, response_id)
             else:
-                embed.description += f"\n**❌ Denied:** <t:{unix_ts}:f>"
+                embed.description += f"\n**Denied:** <t:{unix_ts}:f>"
                 embed.colour = discord.Color.red()
                 await self._handle_denial(guild, response_id)
 
@@ -618,10 +644,7 @@ class ApplicationHandler(commands.Cog):
                 await member.add_roles(role, reason=f"Application {response_id} accepted")
                 logger.info(f"Added role {role.name} to {member.display_name}")
             except discord.HTTPException as e:
-                logger.error(
-                    f"Failed to add role to {
-                        member.display_name}: {e}"
-                )
+                logger.error(f"Failed to add role to {member.display_name}: {e}")
 
         # Send notifications
         await self._send_notifications(member, True, guild.name)
@@ -644,8 +667,17 @@ class ApplicationHandler(commands.Cog):
                 logger.warning("Rate limit reached, cannot fetch form responses")
                 return None, None
 
+            # Record API call BEFORE making it
             self._record_api_call()
-            responses = await self.google_service.get_form_responses(self.form_id)
+
+            try:
+                responses = await self.google_service.get_form_responses(self.form_id)
+            except Exception as e:
+                # Remove the recorded API call if it failed
+                if self._api_call_times:
+                    self._api_call_times.pop()
+                raise e
+
             target_response = next((r for r in responses if r["responseId"] == response_id), None)
 
             if not target_response:
@@ -668,10 +700,7 @@ class ApplicationHandler(commands.Cog):
 
             role = guild.get_role(self.member_role_id)
             if not role:
-                logger.error(
-                    f"Could not find role with ID {
-                        self.member_role_id}"
-                )
+                logger.error(f"Could not find role with ID {self.member_role_id}")
                 return member, None
 
             return member, role
@@ -691,15 +720,9 @@ class ApplicationHandler(commands.Cog):
             try:
                 message = f"Your application to **{guild_name}** has been **accepted**! You now have access to the server."
                 await member.send(message)
-                logger.info(
-                    f"Successfully notified {
-                        member.display_name} of acceptance"
-                )
+                logger.info(f"Successfully notified {member.display_name} of acceptance")
             except discord.Forbidden:
-                logger.warning(
-                    f"Could not DM {
-                        member.display_name} about acceptance"
-                )
+                logger.warning(f"Could not DM {member.display_name} about acceptance")
 
             # Post welcome message in general
             general_channel = guild.get_channel(self.general_channel_id)
@@ -707,10 +730,7 @@ class ApplicationHandler(commands.Cog):
                 try:
                     welcome_message = f"Welcome to {guild_name}, {member.mention}! " f"Please reach out to an admin if you have any questions."
                     await general_channel.send(welcome_message)
-                    logger.info(
-                        f"Sent welcome message for {
-                            member.display_name}"
-                    )
+                    logger.info(f"Sent welcome message for {member.display_name}")
                 except discord.HTTPException as e:
                     logger.error(f"Failed to send welcome message: {e}")
 
@@ -733,6 +753,45 @@ class ApplicationHandler(commands.Cog):
         except Exception as e:
             logger.error(f"Error getting application stats: {e}")
             await ctx.send("Error retrieving application statistics.")
+
+    @commands.command(name="reset_rate_limit")
+    @commands.has_permissions(administrator=True)
+    async def reset_rate_limit(self, ctx):
+        """Reset rate limiting counters (admin only)."""
+        try:
+            self._api_call_times.clear()
+            self._last_rate_limit_time = 0
+            await ctx.send("Rate limiting counters have been reset.")
+            logger.info("Rate limiting counters reset by admin command")
+        except Exception as e:
+            logger.error(f"Error resetting rate limit: {e}")
+            await ctx.send("Error resetting rate limiting counters.")
+
+    @commands.command(name="rate_limit_status")
+    @commands.has_permissions(administrator=True)
+    async def rate_limit_status(self, ctx):
+        """Show current rate limiting status (admin only)."""
+        try:
+            now = time.time()
+            cutoff = now - self._rate_limit_window
+            recent_calls = [t for t in self._api_call_times if t > cutoff]
+
+            is_limited = len(recent_calls) >= self._max_calls_per_minute
+            backoff_remaining = max(0, self._rate_limit_backoff - (now - self._last_rate_limit_time))
+
+            embed = discord.Embed(title="Rate Limiting Status", color=discord.Color.red() if is_limited else discord.Color.green())
+
+            embed.add_field(name="Current Status", value="Rate Limited" if is_limited else "Normal", inline=True)
+            embed.add_field(name="API Calls (Last 60s)", value=f"{len(recent_calls)}/{self._max_calls_per_minute}", inline=True)
+
+            if backoff_remaining > 0:
+                embed.add_field(name="Backoff Remaining", value=f"{backoff_remaining:.1f} seconds", inline=True)
+
+            await ctx.send(embed=embed)
+
+        except Exception as e:
+            logger.error(f"Error getting rate limit status: {e}")
+            await ctx.send("Error retrieving rate limit status.")
 
 
 async def setup(bot):

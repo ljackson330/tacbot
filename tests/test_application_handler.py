@@ -1,5 +1,6 @@
 import unittest
 from unittest.mock import MagicMock, AsyncMock, patch
+import time
 from cogs.application_handler import ApplicationHandler
 
 
@@ -41,11 +42,16 @@ class TestApplicationHandler(unittest.TestCase):
             self.handler.google_service = self.mock_google
             self.handler._vote_lock = unittest.mock.MagicMock()
             self.handler._api_call_times = []
-            self.handler._max_calls_per_minute = 50
+            self.handler._max_calls_per_minute = 30
+            self.handler._rate_limit_window = 60
             self.handler._recent_responses = {}
             self.handler._response_cache_ttl = 300
             self.handler.question_map = {}
             self.handler._processing_applications = set()
+
+            # Initialize the new rate limiting attributes
+            self.handler._last_rate_limit_time = 0
+            self.handler._rate_limit_backoff = 60
 
             # Load config manually
             self.handler._load_config()
@@ -128,13 +134,86 @@ class TestApplicationHandler(unittest.TestCase):
         self.assertFalse(self.handler._is_decisive_vote(vote_counts, "deny"))
 
     def test_rate_limiting(self):
-        """Test rate limiting functionality"""
+        """Test rate limiting functionality with improved logic"""
+        # Reset state for clean test
+        self.handler._api_call_times = []
+        self.handler._last_rate_limit_time = 0
+
         # Initially should not be rate limited
         self.assertFalse(self.handler._is_rate_limited())
 
-        # Add many calls to trigger rate limiting
-        for _ in range(51):
+        # Add calls up to but not exceeding the limit
+        for _ in range(self.handler._max_calls_per_minute - 1):
             self.handler._record_api_call()
+
+        # Should still not be rate limited
+        self.assertFalse(self.handler._is_rate_limited())
+
+        # Add one more call to reach the limit
+        self.handler._record_api_call()
 
         # Now should be rate limited
         self.assertTrue(self.handler._is_rate_limited())
+
+        # Should remain rate limited due to backoff even if we clear calls
+        self.handler._api_call_times = []
+        self.assertTrue(self.handler._is_rate_limited())  # Still in backoff period
+
+    def test_rate_limiting_window_expiry(self):
+        """Test that rate limiting expires after the window period"""
+        # Simulate calls from more than 60 seconds ago
+        old_time = time.time() - 70  # 70 seconds ago
+        self.handler._api_call_times = [old_time] * self.handler._max_calls_per_minute
+        self.handler._last_rate_limit_time = 0
+
+        # Should not be rate limited since calls are outside the window
+        self.assertFalse(self.handler._is_rate_limited())
+
+    def test_rate_limiting_backoff_period(self):
+        """Test that backoff period is respected"""
+        # Set up a recent rate limit hit
+        self.handler._last_rate_limit_time = time.time() - 30  # 30 seconds ago
+        self.handler._api_call_times = []  # No current calls
+
+        # Should still be rate limited due to backoff
+        self.assertTrue(self.handler._is_rate_limited())
+
+        # Simulate backoff period expiring
+        self.handler._last_rate_limit_time = time.time() - 70  # 70 seconds ago
+
+        # Should no longer be rate limited
+        self.assertFalse(self.handler._is_rate_limited())
+
+    @patch("time.time")
+    def test_api_call_recording(self, mock_time):
+        """Test API call timestamp recording"""
+        mock_time.return_value = 1000.0
+
+        # Reset state
+        self.handler._api_call_times = []
+
+        # Record a call
+        self.handler._record_api_call()
+
+        # Should have recorded the timestamp
+        self.assertEqual(len(self.handler._api_call_times), 1)
+        self.assertEqual(self.handler._api_call_times[0], 1000.0)
+
+    def test_rate_limit_cleanup(self):
+        """Test that old API call timestamps are cleaned up"""
+        current_time = time.time()
+
+        # Add some old calls and some recent calls
+        old_calls = [current_time - 70, current_time - 80, current_time - 90]  # > 60 seconds old
+        recent_calls = [current_time - 10, current_time - 20, current_time - 30]  # < 60 seconds old
+
+        self.handler._api_call_times = old_calls + recent_calls
+        self.handler._last_rate_limit_time = 0
+
+        # Check rate limit (this should clean up old calls)
+        self.handler._is_rate_limited()
+
+        # Should only have recent calls left
+        self.assertEqual(len(self.handler._api_call_times), 3)
+        for call_time in self.handler._api_call_times:
+            self.assertGreater(call_time, current_time - 60)
