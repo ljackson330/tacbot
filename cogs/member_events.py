@@ -21,6 +21,7 @@ class MemberEvents(commands.Cog):
             self.applicant_role_id = int(os.getenv("APPLICANT_ROLE_ID"))
             self.admin_role_id = int(os.getenv("ADMIN_ROLE_ID"))
             self.join_leave_channel_id = int(os.getenv("JOIN_LEAVE_CHANNEL_ID"))
+            self.applicants_channel_id = int(os.getenv("APPLICANTS_CHANNEL_ID"))
         except (ValueError, TypeError) as e:
             logger.error(f"Invalid configuration values: {e}")
             raise
@@ -55,6 +56,10 @@ class MemberEvents(commands.Cog):
                     logger.warning(f"Could not find admin role with ID {self.admin_role_id}")
             else:
                 logger.warning(f"Could not find join/leave channel with ID {self.join_leave_channel_id}")
+            applicants_channel = guild.get_channel(self.applicants_channel_id)
+            if applicants_channel:
+                welcome_message = f"Welcome, {member.mention}! Use command ``/apply`` to begin your application process."
+                await applicants_channel.send(welcome_message)
 
         except discord.Forbidden:
             logger.error(f"Missing permissions to assign role to {member.display_name}")
