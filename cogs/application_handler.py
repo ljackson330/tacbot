@@ -104,6 +104,9 @@ class ApplicationHandler(commands.Cog):
             "acceptance_threshold": ("ACCEPTANCE_THRESHOLD", int),
             "denial_threshold": ("DENIAL_THRESHOLD", int),
             "member_role_id": ("MEMBER_ROLE_ID", int),
+            "applicant_role_id": ("APPLICANT_ROLE_ID", int),
+            "applicant_channel_id": ("APPLICANT_CHANNEL_ID", int),
+            "recruit_role_id": ("RECRUIT_ROLE_ID", int),
             "general_channel_id": ("GENERAL_CHANNEL_ID", int),
             "discord_id_question": ("DISCORD_ID_QUESTION_ID", str),
             "poll_interval": ("APPLICATION_POLL_INTERVAL", int),
@@ -259,10 +262,53 @@ class ApplicationHandler(commands.Cog):
             # Store message info in database
             self.db.store_application_message(response_id, message.id, channel.id)
 
+            # Send confirmation message to applicant
+            await self._send_application_confirmation(response, guild)
+
             logger.info(f"Processed new application: {response_id}")
 
         except Exception as e:
             logger.error(f"Error processing response {response_id}: {e}")
+
+    async def _send_application_confirmation(self, response: Dict[str, Any], guild: discord.Guild):
+        """Send confirmation message to applicant via DM, with channel fallback."""
+        try:
+            # Extract Discord ID from response
+            answers = response.get("answers", {})
+            discord_data = self._extract_discord_id(answers)
+
+            if not discord_data:
+                logger.warning("Could not extract Discord ID for confirmation message")
+                return
+
+            discord_id, _ = discord_data
+            member = await self._get_discord_member(discord_id, guild)
+
+            if not member:
+                logger.warning(f"Could not find member {discord_id} for confirmation message")
+                return
+
+            confirmation_message = "Thank you for submitting your application! We have received it and will review it shortly."
+
+            # Try to send DM first
+            try:
+                await member.send(confirmation_message)
+                logger.info(f"Sent application confirmation DM to {member.display_name}")
+            except discord.Forbidden:
+                # DMs are disabled or blocked - fall back to channel message
+                logger.warning(f"Could not DM {member.display_name}, falling back to channel message")
+
+                applicant_channel = guild.get_channel(self.applicant_channel_id)
+                if not applicant_channel:
+                    logger.error(f"Could not find applicant channel with ID {self.applicant_channel_id}")
+                    return
+
+                # Send in channel with mention as fallback
+                await applicant_channel.send(f"{member.mention}, {confirmation_message}")
+                logger.info(f"Sent application confirmation in channel to {member.display_name}")
+
+        except Exception as e:
+            logger.error(f"Error sending application confirmation: {e}")
 
     def _extract_discord_id(self, answers: Dict[str, Any]) -> Optional[Tuple[str, str]]:
         """Extract Discord ID from form answers."""
@@ -634,6 +680,8 @@ class ApplicationHandler(commands.Cog):
     async def _handle_acceptance(self, guild: discord.Guild, response_id: str):
         """Handle application acceptance."""
         member, role = await self._get_member_and_role(guild, response_id)
+        applicant_role = member.guild.get_role(self.applicant_role_id)
+        recruit_role = member.guild.get_role(self.recruit_role_id)
 
         if not member:
             logger.warning(f"Could not find member for accepted application {response_id}")
@@ -641,10 +689,11 @@ class ApplicationHandler(commands.Cog):
 
         if role:
             try:
-                await member.add_roles(role, reason=f"Application {response_id} accepted")
+                await member.add_roles(role, recruit_role, reason=f"Application {response_id} accepted")
                 logger.info(f"Added role {role.name} to {member.display_name}")
+                await member.remove_roles(applicant_role, reason=f"Application {response_id} accepted")
             except discord.HTTPException as e:
-                logger.error(f"Failed to add role to {member.display_name}: {e}")
+                logger.error(f"Failed to update roles for {member.display_name}: {e}")
 
         # Send notifications
         await self._send_notifications(member, True, guild.name)
@@ -728,7 +777,7 @@ class ApplicationHandler(commands.Cog):
             general_channel = guild.get_channel(self.general_channel_id)
             if general_channel:
                 try:
-                    welcome_message = f"Welcome to {guild_name}, {member.mention}! " f"Please reach out to an admin if you have any questions."
+                    welcome_message = f"{member.mention} has been accepted to {guild_name}! Please give them a warm welcome"
                     await general_channel.send(welcome_message)
                     logger.info(f"Sent welcome message for {member.display_name}")
                 except discord.HTTPException as e:

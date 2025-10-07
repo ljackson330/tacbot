@@ -25,6 +25,7 @@ def validate_environment():
         "GOOGLE_CREDENTIALS_FILE",
         "GOOGLE_TOKEN_FILE",
         "MEMBER_ROLE_ID",
+        "APPLICANT_ROLE_ID",
     ]
 
     missing_vars = []
@@ -54,12 +55,17 @@ class TacBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.reactions = True
+        intents.members = True
 
         super().__init__(command_prefix="!", intents=intents, description="Havoc Tactical Bot")
 
     async def setup_hook(self):
         """Called when the bot is starting up"""
-        cogs_to_load = ["cogs.application_handler", "cogs.chat_commands", "cogs.event_handler"]
+        cogs_to_load = [
+            "cogs.application_handler",
+            "cogs.chat_commands",
+            "cogs.member_events",
+        ]
 
         for cog in cogs_to_load:
             try:
