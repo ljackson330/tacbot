@@ -61,18 +61,15 @@ class TacBot(commands.Bot):
 
     async def setup_hook(self):
         """Called when the bot is starting up"""
-        cogs_to_load = [
-            "cogs.application_handler",
-            "cogs.chat_commands",
-            "cogs.member_events",
-        ]
+        cogs_to_load = ["cogs.application_handler", "cogs.chat_commands", "cogs.member_events", "cogs.event_handler"]
 
         for cog in cogs_to_load:
             try:
+                logging.info(f"Attempting to load cog: {cog}")
                 await self.load_extension(cog)
-                logging.info(f"Loaded cog: {cog}")
+                logging.info(f"Successfully loaded cog: {cog}")
             except Exception as e:
-                logging.error(f"Failed to load cog {cog}: {e}")
+                logging.error(f"Failed to load cog {cog}: {e}", exc_info=True)
 
     async def on_ready(self):
         logging.info(f"TacBot has connected to Discord as {self.user}")
